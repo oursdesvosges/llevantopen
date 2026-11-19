@@ -1,0 +1,20 @@
+[package]
+name = "llevant-openmc"
+description = "Pure-Rust OpenMC XML (geometry.xml, materials.xml, model.xml) loader and CSG compiler for llevant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+name = "llevant_openmc"
+crate-type = ["lib"]
+
+[dependencies]
+
+[lints]
+workspace = true
