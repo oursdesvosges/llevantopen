@@ -98,10 +98,9 @@ pub fn read_input_bytes(path: &Path) -> Result<Vec<u8>, OpenMcError> {
         source,
     })?;
     let mats_text = match mats_path {
-        Some(mp) => Some(fs::read_to_string(&mp).map_err(|source| OpenMcError::Io {
-            path: mp,
-            source,
-        })?),
+        Some(mp) => {
+            Some(fs::read_to_string(&mp).map_err(|source| OpenMcError::Io { path: mp, source })?)
+        }
         None => None,
     };
 
@@ -198,7 +197,9 @@ fn parse_xml_nodes(src: &str) -> Result<Vec<XmlNode>, OpenMcError> {
                 pos += 2 + end + 2;
                 continue;
             } else {
-                return Err(OpenMcError::Parse("unterminated XML processing instruction".into()));
+                return Err(OpenMcError::Parse(
+                    "unterminated XML processing instruction".into(),
+                ));
             }
         }
         if src[pos..].starts_with("<![CDATA[") {
@@ -275,7 +276,12 @@ fn parse_xml_nodes(src: &str) -> Result<Vec<XmlNode>, OpenMcError> {
 
             // Parse attribute name
             let k_start = pos;
-            while pos < len && !matches!(bytes[pos], b'=' | b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/') {
+            while pos < len
+                && !matches!(
+                    bytes[pos],
+                    b'=' | b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/'
+                )
+            {
                 pos += 1;
             }
             let key = src[k_start..pos].to_string();
@@ -452,10 +458,7 @@ fn parse_materials(nodes: &[XmlNode]) -> Result<BTreeMap<i64, OpenMcMaterial>, O
             Some(v) => v,
             None => continue,
         };
-        let name = mnode
-            .attr("name")
-            .unwrap_or("")
-            .replace(['\n', '\r'], " ");
+        let name = mnode.attr("name").unwrap_or("").replace(['\n', '\r'], " ");
 
         let mut nuclides: Vec<(String, f64)> = Vec::new();
         let mut ao_sum = 0.0_f64;
@@ -535,8 +538,7 @@ fn parse_materials(nodes: &[XmlNode]) -> Result<BTreeMap<i64, OpenMcMaterial>, O
 /// Convert OpenMC boolean region expression to MCNP syntax.
 fn openmc_region_to_mcnp(region: &str) -> String {
     let mut out = String::with_capacity(region.len() + 8);
-    let mut chars = region.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in region.chars() {
         match c {
             '|' => {
                 out.push(' ');
@@ -745,11 +747,10 @@ pub fn openmc_xml_to_mcnp(
                     .map_err(|_| OpenMcError::Parse(format!("invalid lattice dimension `{t}`")))
             })
             .collect::<Result<_, _>>()?;
-        let lower_left = parse_f64_list(
-            lnode
-                .child_text("lower_left")
-                .ok_or_else(|| OpenMcError::Parse(format!("lattice {id} missing <lower_left>")))?,
-        )?;
+        let lower_left =
+            parse_f64_list(lnode.child_text("lower_left").ok_or_else(|| {
+                OpenMcError::Parse(format!("lattice {id} missing <lower_left>"))
+            })?)?;
         let pitch = parse_f64_list(
             lnode
                 .child_text("pitch")
@@ -760,7 +761,9 @@ pub fn openmc_xml_to_mcnp(
                 .child_text("universes")
                 .ok_or_else(|| OpenMcError::Parse(format!("lattice {id} missing <universes>")))?,
         )?;
-        let outer = lnode.child_text("outer").and_then(|s| s.parse::<i64>().ok());
+        let outer = lnode
+            .child_text("outer")
+            .and_then(|s| s.parse::<i64>().ok());
         lattices.insert(
             id,
             OpenMcLattice {
@@ -801,7 +804,9 @@ pub fn openmc_xml_to_mcnp(
             .and_then(|u| u.trim().parse::<i64>().ok())
             .unwrap_or(0);
         let region = cnode.attr("region").unwrap_or("").to_string();
-        let fill = cnode.attr("fill").and_then(|f| f.trim().parse::<i64>().ok());
+        let fill = cnode
+            .attr("fill")
+            .and_then(|f| f.trim().parse::<i64>().ok());
         let translation = match cnode.attr("translation") {
             Some(ts) => {
                 let v = parse_f64_list(ts)?;
@@ -868,18 +873,19 @@ pub fn openmc_xml_to_mcnp(
     }
 
     // Synthesize MCNP transforms (TRn), lattice helper universes, and extra bounding planes
-    let mut transforms: Vec<(i64, [f64; 3], Option<[[f64; 3]; 3]>)> = Vec::new();
+    type McnpTransform = (i64, [f64; 3], Option<[[f64; 3]; 3]>);
+    let mut transforms: Vec<McnpTransform> = Vec::new();
     let mut next_tr_id: i64 = 1;
     let mut next_surf_id: i64 = (max_surf_id + 100).max(10000);
     let mut next_cell_id: i64 = (max_cell_id + 100).max(10000);
-    let mut next_univ_id: i64 = (max_univ_id + 100).max(1000);
+    let base_univ_id: i64 = (max_univ_id + 100).max(1000);
 
     let mut extra_surfaces: Vec<(i64, String, String)> = Vec::new();
     let mut extra_cells: Vec<(Vec<String>, Option<String>)> = Vec::new();
 
     // Map each OpenMC lattice ID -> (synthesized MCNP universe ID, element [0,0,0] center offset)
     let mut lat_to_mcnp: HashMap<i64, (i64, [f64; 3])> = HashMap::new();
-    for lat in lattices.values() {
+    for (u_lat, lat) in (base_univ_id..).zip(lattices.values()) {
         let nx = *lat.dimension.first().unwrap_or(&1);
         let ny = *lat.dimension.get(1).unwrap_or(&1);
         let is_3d = lat.dimension.len() >= 3 && lat.lower_left.len() >= 3 && lat.pitch.len() >= 3;
@@ -899,8 +905,6 @@ pub fn openmc_xml_to_mcnp(
             if is_3d { z0 + 0.5 * pz } else { 0.0 },
         ];
 
-        let u_lat = next_univ_id;
-        next_univ_id += 1;
         let lat_cell_id = next_cell_id;
         next_cell_id += 1;
 
@@ -992,10 +996,7 @@ pub fn openmc_xml_to_mcnp(
         match cell.material {
             Some(mid) => {
                 toks.push(mid.to_string());
-                let rho = materials
-                    .get(&mid)
-                    .map(|m| m.mcnp_density)
-                    .unwrap_or(-1.0);
+                let rho = materials.get(&mid).map(|m| m.mcnp_density).unwrap_or(-1.0);
                 toks.push(fmt_num(rho));
             }
             None => {
