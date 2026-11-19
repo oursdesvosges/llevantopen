@@ -285,9 +285,9 @@ impl Model {
     ) -> Result<Model> {
         let t = Instant::now();
         let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
+        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
+            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
         })?;
         let read = t.elapsed().as_secs_f64();
         let mut m = Model::compile(&bytes, opts, progress)?;
@@ -422,7 +422,9 @@ impl Model {
         };
         stop()?;
         progress.set_stage("parsing");
-        let text = String::from_utf8_lossy(input);
+        let translated = llevant_openmc::maybe_translate_bytes(input)
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        let text = String::from_utf8_lossy(&translated);
         let t = Instant::now();
         let parsed = migjorn::Model::parse(&text);
         let parse = t.elapsed().as_secs_f64();

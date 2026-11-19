@@ -140,12 +140,12 @@ impl std::fmt::Debug for Source {
 }
 
 impl Source {
-    /// Read the input at `path`.
+    /// Read the input at `path` (supports MCNP decks and OpenMC XML models/directories).
     pub fn load(path: impl AsRef<Path>) -> Result<Source> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
+        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
+            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
         })?;
         Ok(Source::from_str(&String::from_utf8_lossy(&bytes)))
     }
