@@ -24,6 +24,7 @@ path = "src/main.rs"
 mimalloc.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 llevant.workspace = true
+llevant-openmc.workspace = true
 llevant-render.workspace = true
 llevant-scene.workspace = true
 llevant-gpu = { workspace = true, optional = true }

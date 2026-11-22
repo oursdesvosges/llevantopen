@@ -65,6 +65,74 @@ fn from_text(
     Ok(Model::new(m, None, opts).with_text(text.into()))
 }
 
+/// Read an input file or OpenMC model directory (MCNP, OpenMC, TRIPOLI-4,
+/// or DRAGON5) and return canonical MCNP input text.
+#[pyfunction]
+fn _translate_path(py: Python<'_>, path: PathBuf) -> PyResult<String> {
+    let bytes = py
+        .detach(|| llevant::read_input_bytes(&path))
+        .map_err(convert::err)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Translate MCNP, OpenMC XML, TRIPOLI-4, or DRAGON5 text into canonical MCNP
+/// input text.
+#[pyfunction]
+fn _translate_text(py: Python<'_>, text: &str) -> PyResult<String> {
+    let translated = py
+        .detach(|| llevant::translate_input_bytes(text.as_bytes()))
+        .map_err(convert::err)?;
+    Ok(String::from_utf8_lossy(translated.as_ref()).into_owned())
+}
+
+/// Read OpenMC `<plot>` slice/voxel metadata from a model path or `plots.xml`.
+#[pyfunction]
+#[pyo3(signature = (model_path, plots_xml = None))]
+fn _read_openmc_plots(
+    py: Python<'_>,
+    model_path: PathBuf,
+    plots_xml: Option<PathBuf>,
+) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+    let plots = py
+        .detach(|| llevant_openmc::read_openmc_plots(&model_path, plots_xml.as_deref()))
+        .map_err(|e| match e {
+            llevant_openmc::OpenMcError::Io { path, source } => {
+                convert::err(llevant::Error::Io { path, source })
+            }
+            other => invalid(other.to_string()),
+        })?;
+    plots
+        .into_iter()
+        .map(|p| {
+            let d = pyo3::types::PyDict::new(py);
+            d.set_item("id", p.id)?;
+            d.set_item("filename", p.filename)?;
+            d.set_item("type", p.plot_type)?;
+            d.set_item("basis", p.basis)?;
+            d.set_item("color_by", p.color_by)?;
+            d.set_item("origin", (p.origin[0], p.origin[1], p.origin[2]))?;
+            d.set_item("width", (p.width[0], p.width[1]))?;
+            d.set_item("pixels", (p.pixels[0], p.pixels[1]))?;
+            d.set_item("show_overlaps", p.show_overlaps)?;
+            Ok(d.unbind())
+        })
+        .collect()
+}
+
+/// Translate native TRIPOLI-4 input text directly into canonical MCNP text.
+#[pyfunction]
+fn _tripoli_to_mcnp(py: Python<'_>, text: &str) -> PyResult<String> {
+    py.detach(|| llevant_tripoli::tripoli_to_mcnp(text))
+        .map_err(|e| invalid(e.to_string()))
+}
+
+/// Translate native DRAGON5 CLE-2000 `GEO:` text directly into canonical MCNP text.
+#[pyfunction]
+fn _dragon_to_mcnp(py: Python<'_>, text: &str) -> PyResult<String> {
+    py.detach(|| llevant_dragon::dragon_to_mcnp(text))
+        .map_err(|e| invalid(e.to_string()))
+}
+
 /// Use `n` worker threads for every query from now on. Only possible
 /// before the first query (the thread pool is made once).
 #[pyfunction]
@@ -100,6 +168,11 @@ fn _llevant(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(main, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(from_text, m)?)?;
+    m.add_function(wrap_pyfunction!(_translate_path, m)?)?;
+    m.add_function(wrap_pyfunction!(_translate_text, m)?)?;
+    m.add_function(wrap_pyfunction!(_read_openmc_plots, m)?)?;
+    m.add_function(wrap_pyfunction!(_tripoli_to_mcnp, m)?)?;
+    m.add_function(wrap_pyfunction!(_dragon_to_mcnp, m)?)?;
     m.add_function(wrap_pyfunction!(set_threads, m)?)?;
     m.add_function(wrap_pyfunction!(threads, m)?)?;
     m.add_class::<Model>()?;

@@ -749,6 +749,158 @@ pub fn grams_per_cm3(density: f64, atomic_mass: f64) -> Option<f64> {
     }
 }
 
+/// Mass and sampling standard error `(mass_g, mass_sigma_g)` of one cell
+/// given its volume in cm³ and standard error, or `None` for void cells or
+/// positive atom densities whose material atomic mass is unknown.
+pub fn cell_mass(
+    model: &Model,
+    looks: &Looks,
+    cell_id: i64,
+    volume_cm3: f64,
+    sigma_cm3: f64,
+) -> Option<(f64, f64)> {
+    let idx = model.cell_index(cell_id)?;
+    let cell = model.cell(idx);
+    if cell.material == 0 {
+        return None;
+    }
+    let atomic_mass = looks
+        .materials
+        .iter()
+        .find(|m| m.id == cell.material)
+        .map_or(0.0, |m| m.mix.atomic_mass);
+    let rho = grams_per_cm3(cell.density, atomic_mass)?;
+    Some((volume_cm3 * rho, sigma_cm3 * rho))
+}
+
+/// Mass and standard error `(mass_g, mass_sigma_g)` of a volume group.
+///
+/// Only `Status::Inside` groups have a defined mass. For `GroupBy::Material`
+/// and `GroupBy::Universe`, providing per-cell groups (`cell_groups`) sums
+/// cell masses and combines their uncertainties in quadrature, which handles
+/// materials used at multiple densities or heterogeneous universes accurately.
+pub fn group_mass(
+    model: &Model,
+    looks: &Looks,
+    by: llevant::GroupBy,
+    group: &llevant::Group,
+    cell_groups: Option<&[llevant::Group]>,
+) -> Option<(f64, f64)> {
+    if group.status != llevant::Status::Inside {
+        return None;
+    }
+    match by {
+        llevant::GroupBy::Cell => {
+            let cid = group.number?;
+            cell_mass(model, looks, cid, group.volume.estimate, group.volume.sigma)
+        }
+        llevant::GroupBy::Label => {
+            let cidx = group.label.as_ref()?.cell()?;
+            let cid = model.cell(cidx).id;
+            cell_mass(model, looks, cid, group.volume.estimate, group.volume.sigma)
+        }
+        llevant::GroupBy::Material => {
+            let mid = group.number?;
+            if mid == 0 {
+                return None;
+            }
+            if let Some(cgs) = cell_groups {
+                let mut total_mass = 0.0;
+                let mut total_var = 0.0;
+                let mut any = false;
+                for cg in cgs {
+                    if cg.status != llevant::Status::Inside {
+                        continue;
+                    }
+                    let Some(cid) = cg.number else {
+                        continue;
+                    };
+                    let Some(cidx) = model.cell_index(cid) else {
+                        continue;
+                    };
+                    if model.cell(cidx).material != mid {
+                        continue;
+                    }
+                    if let Some((m, dm)) =
+                        cell_mass(model, looks, cid, cg.volume.estimate, cg.volume.sigma)
+                    {
+                        any = true;
+                        total_mass += m;
+                        total_var += dm * dm;
+                    }
+                }
+                return any.then(|| (total_mass, total_var.sqrt()));
+            }
+            let ml = looks.materials.iter().find(|m| m.id == mid)?;
+            if ml.density.0.is_finite()
+                && ml.density.1.is_finite()
+                && (ml.density.1 - ml.density.0).abs() <= 1e-12 * ml.density.1.abs().max(1.0)
+            {
+                Some((
+                    group.volume.estimate * ml.density.0,
+                    group.volume.sigma * ml.density.0,
+                ))
+            } else {
+                None
+            }
+        }
+        llevant::GroupBy::Universe => {
+            let uid = group.number?;
+            if let Some(cgs) = cell_groups {
+                let mut total_mass = 0.0;
+                let mut total_var = 0.0;
+                let mut any = false;
+                for cg in cgs {
+                    if cg.status != llevant::Status::Inside {
+                        continue;
+                    }
+                    let Some(cid) = cg.number else {
+                        continue;
+                    };
+                    let Some(cidx) = model.cell_index(cid) else {
+                        continue;
+                    };
+                    let cell = model.cell(cidx);
+                    if model.units()[cell.unit as usize].universe != uid || cell.material == 0 {
+                        continue;
+                    }
+                    if let Some((m, dm)) =
+                        cell_mass(model, looks, cid, cg.volume.estimate, cg.volume.sigma)
+                    {
+                        any = true;
+                        total_mass += m;
+                        total_var += dm * dm;
+                    }
+                }
+                return any.then(|| (total_mass, total_var.sqrt()));
+            }
+            let mut uniform_rho: Option<f64> = None;
+            for cell in model.cells() {
+                if cell.fill.is_some() || model.units()[cell.unit as usize].universe != uid {
+                    continue;
+                }
+                let rho = if cell.material == 0 {
+                    0.0
+                } else {
+                    let am = looks
+                        .materials
+                        .iter()
+                        .find(|m| m.id == cell.material)
+                        .map_or(0.0, |m| m.mix.atomic_mass);
+                    grams_per_cm3(cell.density, am)?
+                };
+                match uniform_rho {
+                    None => uniform_rho = Some(rho),
+                    Some(prev) if (rho - prev).abs() <= 1e-12 * prev.abs().max(1.0) => {}
+                    Some(_) => return None,
+                }
+            }
+            let rho = uniform_rho.filter(|&r| r > 0.0)?;
+            Some((group.volume.estimate * rho, group.volume.sigma * rho))
+        }
+    }
+}
+
 /// Changes to the look of a material: a category to start from and any of
 /// colour, roughness, metalness and clarity. Written `steel`,
 /// `copper roughness=0.2`, `colour=#806040 metalness=0`, `albedo=0.2,0.2,0.25`
@@ -1185,5 +1337,83 @@ mod tests {
         let mix = analyse(&e(&[("1001", 2.0), ("8016", 1.0)]));
         let rho = grams_per_cm3(0.1003, mix.atomic_mass).unwrap();
         assert!((rho - 1.0).abs() < 0.01, "{rho}");
+    }
+
+    #[test]
+    fn cell_and_group_masses() {
+        let mcnp = "\
+mass balance test
+1 1 -2.0 -1 imp:n=1
+2 1 -4.0  1 -2 imp:n=1
+3 2  0.1003  2 -3 imp:n=1
+4 0  3 imp:n=0
+
+1 rpp 0 1 0 1 0 1
+2 rpp 0 2 0 1 0 1
+3 rpp 0 3 0 1 0 1
+
+mode n
+m1 26056 1.0
+m2 1001 2.0 8016 1.0
+";
+        let m = Model::from_text(mcnp, &Default::default());
+        assert!(m.diagnostics().is_empty(), "{:?}", m.diagnostics());
+        let looks = Looks::new(&m, &[]).unwrap();
+        let (m1, dm1) = cell_mass(&m, &looks, 1, 1.0, 0.1).unwrap();
+        assert!((m1 - 2.0).abs() < 1e-12 && (dm1 - 0.2).abs() < 1e-12);
+        assert!(cell_mass(&m, &looks, 4, 1.0, 0.1).is_none());
+
+        let grid = llevant::VolumeGrid::new(m.extent(llevant::Scope::Problem, 32), 0.1);
+        let vols = m.volumes(&grid, None).unwrap();
+        let by_cell = vols.grouped(&m, llevant::GroupBy::Cell);
+        let by_mat = vols.grouped(&m, llevant::GroupBy::Material);
+        let mat1 = by_mat.iter().find(|g| g.number == Some(1)).unwrap();
+        // Multi-density material needs cell breakdown for exact mass & sigma.
+        assert!(group_mass(&m, &looks, llevant::GroupBy::Material, mat1, None).is_none());
+        let (mm1, dmm1) =
+            group_mass(&m, &looks, llevant::GroupBy::Material, mat1, Some(&by_cell)).unwrap();
+        let (c1m, c1s) = cell_mass(
+            &m,
+            &looks,
+            1,
+            by_cell
+                .iter()
+                .find(|g| g.number == Some(1))
+                .unwrap()
+                .volume
+                .estimate,
+            by_cell
+                .iter()
+                .find(|g| g.number == Some(1))
+                .unwrap()
+                .volume
+                .sigma,
+        )
+        .unwrap();
+        let (c2m, c2s) = cell_mass(
+            &m,
+            &looks,
+            2,
+            by_cell
+                .iter()
+                .find(|g| g.number == Some(2))
+                .unwrap()
+                .volume
+                .estimate,
+            by_cell
+                .iter()
+                .find(|g| g.number == Some(2))
+                .unwrap()
+                .volume
+                .sigma,
+        )
+        .unwrap();
+        assert!((mm1 - (c1m + c2m)).abs() < 1e-9);
+        assert!((dmm1 - (c1s * c1s + c2s * c2s).sqrt()).abs() < 1e-9);
+
+        let mat2 = by_mat.iter().find(|g| g.number == Some(2)).unwrap();
+        let (mm2, _) =
+            group_mass(&m, &looks, llevant::GroupBy::Material, mat2, Some(&by_cell)).unwrap();
+        assert!((mm2 - 1.0).abs() < 0.05, "{mm2}");
     }
 }

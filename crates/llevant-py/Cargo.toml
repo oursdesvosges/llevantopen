@@ -20,6 +20,9 @@ crate-type = ["cdylib"]
 mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
 aci-tallies-geom.workspace = true
 llevant.workspace = true
+llevant-openmc.workspace = true
+llevant-tripoli.workspace = true
+llevant-dragon.workspace = true
 llevant-render.workspace = true
 llevant-scene = { workspace = true, features = ["tallies"] }
 llevant-cli = { workspace = true, features = ["gpu", "viewer"] }

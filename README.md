@@ -5,7 +5,7 @@
 <h1 align="center">llevantopen</h1>
 
 <p align="center">
-  <strong>Fast, exact geometry queries, 3D viewer, QA, and tally visualization for OpenMC XML and MCNP models</strong>
+  <strong>Fast, exact geometry queries, 3D viewer, QA, and tally visualization for OpenMC, MCNP, TRIPOLI-4, and DRAGON5</strong>
 </p>
 
 <p align="center">
@@ -15,21 +15,22 @@
   <a href="https://github.com/Fusion4Energy/llevant"><img src="https://img.shields.io/badge/upstream-Fusion4Energy%2Fllevant-lightgrey" alt="Upstream: Fusion4Energy/llevant"></a>
 </p>
 
-**llevantopen** extends [llevant](https://github.com/Fusion4Energy/llevant) with native pure-Rust **OpenMC XML** support (`llevant-openmc`, zero OpenMC runtime needed for geometry) and **OpenMC HDF5 statepoint tally loading** (`llevant.read_openmc_tally`), alongside full MCNP support (through [migjorn](https://crates.io/crates/migjorn)). From the interactive 3D viewer, the command line, Python, or Rust, it answers:
+**llevantopen** extends [llevant](https://github.com/Fusion4Energy/llevant) with native pure-Rust loaders for **OpenMC XML** (`llevant-openmc`), **TRIPOLI-4** (`llevant-tripoli`), and **DRAGON5 `GEO:`** (`llevant-dragon`), plus **OpenMC HDF5 statepoint tally visualization**, lost-particle diagnostics, mass balances, and multi-code conversion — alongside full MCNP support (through [migjorn](https://crates.io/crates/migjorn)). From the interactive 3D viewer, the command line, Python, or Rust, it answers:
 
-- **OpenMC XML & MCNP geometry**: load `model.xml`, `geometry.xml` (with auto-discovered sibling `materials.xml`), directories, in-memory XML via `from_text`, and MCNP inputs;
+- **Multi-code geometry**: load OpenMC (`model.xml`, `geometry.xml` + `materials.xml`, directory, or Python objects via `from_openmc`), TRIPOLI-4 (`.t4`, `.tripoli`, `.t4g`), DRAGON5 (`GEO:` in `.x2m`/`.c2m`/`.dragon`), MCNP inputs, or convert between them (`llevant convert`, `llevant.to_mcnp`);
 - **exact point & ray queries**: where points lie (`locate` / `classify`) and every segment a line crosses (`trace`) through nested universes, transforms, and rectilinear/hexagonal lattices;
-- **2D slices & GPU 3D views**: interactive `llevant-viewer` and batch CPU/GPU renders with hiding, isolation, cutaways, and ghost shells;
-- **QA & stochastic volumes**: gaps and overlaps (`check`) plus cell, material, and universe volumes with honest uncertainties;
+- **lost-particle root-cause diagnosis**: inspect failing `(x, y, z)` coordinates or parse MCNP/OpenMC output logs (`llevant lost`, `diagnose_lost_particles`) with zoomed XY/XZ/YZ slices;
+- **2D slices, `plots.xml` & GPU 3D views**: interactive `llevant-viewer`, `llevant plots` for OpenMC `<plots>`, and batch CPU/GPU renders with hiding, isolation, cutaways, and ghost shells;
+- **QA reports, volumes & masses**: gaps and overlaps (`check --plots <DIR>` writing `report.json`, `report.md`, and PNGs) plus cell, material, and universe volumes & **masses (g)** (`volume --mass`, `Group.mass`) with honest uncertainties;
 - **fingerprints & diffs**: tell two revisions of a model apart cell by cell (`fingerprint --diff`);
-- **OpenMC cell `name="..."` label queries**: select, isolate, hide, or bound cells by name (`label "Tungsten"`);
-- **tally & field overlays**: OpenMC HDF5 statepoints (`read_openmc_tally`), MCNP `meshtal`, `MCTAL`, D1SUNED `cuvmsh`, and CSV drawn over the geometry.
+- **cell label queries**: select, isolate, hide, or bound OpenMC `name="..."`, TRIPOLI-4 volume names/comments, or MCNP `$` labels (`label "Tungsten"`);
+- **tally & field overlays**: OpenMC HDF5 statepoints (`openmc_tallies`, `read_openmc_tally` with `energy`/`particle`/`nuclide`/`CellInstanceFilter`/`DistribcellFilter`, `export_openmc_tally_csv`), MCNP `meshtal`, `MCTAL`, D1SUNED `cuvmsh`, and CSV drawn over the geometry.
 
 | OpenMC fusion HTS blanket (3D cutaway) | OpenMC VVER hexagonal lattice (slice at `z=0`) |
 |---|---|
 | ![OpenMC fusion HTS blanket 3D cutaway](docs/img/openmc-fusion-blanket.png) | ![OpenMC VVER hexagonal assembly slice](docs/img/openmc-vver-hex.png) |
 
-Ready-to-run OpenMC models live in [`docs/examples/openmc`](docs/examples/openmc), alongside MCNP models in [`docs/examples`](docs/examples).
+Ready-to-run OpenMC, TRIPOLI-4, DRAGON5, and MCNP examples live in [`docs/examples`](docs/examples).
 
 ![The viewer: a reactor core cut open in 3D](docs/img/viewer.png)
 
@@ -37,20 +38,17 @@ Ready-to-run OpenMC models live in [`docs/examples/openmc`](docs/examples/openmc
 |---|---|
 | ![Pin powers drawn over the core in 3D and in a slice](docs/img/viewer-results.png) | ![The Check workspace listing two overlaps, hatched in the slice](docs/img/viewer-check.png) |
 
-## OpenMC support
+## Multi-code support (OpenMC, TRIPOLI-4, DRAGON5)
 
-`llevant-openmc` translates OpenMC XML models natively in pure Rust (no OpenMC runtime required to inspect, check, slice, render, or view geometry):
+No external neutronics runtime is needed to inspect, check, slice, render, convert, or view OpenMC, TRIPOLI-4, DRAGON5, or MCNP geometry:
 
-| Capability | Supported features |
+| Ecosystem | Supported features |
 |---|---|
-| **Inputs** | `model.xml`, `geometry.xml` (auto-discovers sibling `materials.xml`), a directory containing either, and in-memory XML via `Model::from_text` / `llevant.from_text` |
-| **Surfaces** | `x-plane`, `y-plane`, `z-plane`, `plane`, `sphere`, `x-cylinder`, `y-cylinder`, `z-cylinder`, `x-cone`, `y-cone`, `z-cone`, `x-torus`, `y-torus`, `z-torus`, and `quadric` |
-| **Boundaries** | `vacuum`, `reflective`, `white`, and `periodic` outer boundary conditions |
-| **Repeated structures** | Boolean CSG regions (`&`, `\|`, `~`, parentheses), nested `universe`/`fill`, `translation`, 3-angle Euler & 9-entry `rotation`, 2D/3D `<lattice>` and `<hex_lattice>` (`orientation="y"` & `"x"`, `<outer>`) |
-| **Materials & labels** | Nuclide `ao`/`wo` and elemental compositions (`g/cm3`, `kg/m3`, `atom/b-cm`, `atom/cm3`, `sum`), plus cell `name="..."` attributes exposed to `label "..."` queries |
-| **HDF5 tallies (Python)** | `llevant.read_openmc_tally` loads `cell`, `material`, and `mesh` (`RegularMesh`, `RectilinearMesh`, `CylindricalMesh`) filters, scores by name or index, and `error=True` relative errors (`pip install h5py`) |
+| **OpenMC XML & HDF5** (`llevant-openmc`) | `model.xml`, `geometry.xml` (+ sibling `materials.xml`), directories, `from_openmc(obj)`, `plots.xml` rendering (`llevant plots`); all CSG surfaces, boundary conditions (`vacuum`, `reflective`, `white`, `periodic`), nested fills, Euler/`rotation`, 2D/3D `<lattice>` & `<hex_lattice>`, distributed materials, cell `name="..."` labels; `openmc_tallies`, `read_openmc_tally` (`cell`, `material`, `cellinstance`, `distribcell`, `mesh` + `energy`/`particle`/`nuclide`), `export_openmc_tally_csv` |
+| **TRIPOLI-4** (`llevant-tripoli`) | `GEOMETRY`/`SURF`/`TYPE`/`VOLU` (`EQUA`, `COMBI`, `PLUS`, `MINUS`/`MOINS`, `INTE`, `UNION`, `VPLUS`, `VMOINS`, **`ECRASE`**, `FICTIVE`), `TRANSFORM MATRIX`, `COMPOSITION` (`DENSITY`, `POINT_WISE`, `NB_ATOM`, mass fractions), `GEOMCOMP`, `BOUNDARY_CONDITION` |
+| **DRAGON5 CLE-2000** (`llevant-dragon`) | `GEO:` `CARCEL`, `TUBE`, `HEXCEL`, `CAR2D`, `CAR3D`, inline `::: SUB := GEO: ... ;`, `SPLITR`, `MIX` count validation |
 
-Full MCNP & OpenMC compatibility details: [`docs/reference/supported-input.md`](docs/reference/supported-input.md).
+Full compatibility details: [`docs/reference/supported-input.md`](docs/reference/supported-input.md).
 
 ## Install
 
@@ -150,14 +148,17 @@ On a 425 k-cell fusion reactor model, on a 16-thread laptop ([`docs/benchmarks.m
 | 2D slices with exact boundaries, cell and surface labels | `slice` | `Model::slice`, `llevant_render::labels` |
 | 3D views: hidden cells, cutaways, universe levels, ghost shells | `render` (`--gpu`) | `Model::render`, `Model::first_hits`, `llevant-gpu` |
 | Realistic images: materials sorted by composition, physically based shading | `render --colour realistic`, `materials` | `llevant_scene::materials`, `llevant_render::shading` |
-| Volumes by cell, material, universe or tally bin, with an honest uncertainty | `volume` | `Model::volumes`, `volumes_to`, `instance_volumes` |
-| Gaps and overlaps, with volume and location | `check` | `Volumes::problems` |
+| Volumes and masses by cell, material, universe or tally bin, with uncertainty | `volume --mass` | `Model::volumes`, `group_mass`, `mass_balance` |
+| Gaps and overlaps, with volume, location, and defect slice bundles | `check --plots` | `Volumes::problems`, `check_report` |
+| Lost-particle log/coordinate root-cause diagnosis & zoomed slices | `lost` | `Model::nearest_surface`, `diagnose_lost_particles` |
+| Multi-code conversion (OpenMC / TRIPOLI-4 / DRAGON5 -> MCNP) | `convert` | `read_input_bytes`, `to_mcnp`, `from_tripoli`, `from_dragon` |
+| OpenMC `<plots>` XML rendering directly to PNG | `plots` | `openmc_plots`, `render_openmc_plots` |
 | Fingerprints of cells and universes; model diffs | `fingerprint` | `Model::fingerprints` |
 | A universe (a filler) as a model of its own | `--universe` | `Model::universe` |
-| Cell instances: each place a cell occupies, numbered | `locate` | `Model::instances` |
-| Results over the geometry: OpenMC HDF5 statepoint, meshtal, MCTAL, D1SUNED cuvmsh, CSV | `slice`/`render --field`, `llevant.read_openmc_tally` | `llevant_scene::field` |
+| Cell instances: each place a cell occupies, numbered | `locate` | `Model::instances`, `Model.cell_instances` |
+| Results over the geometry: OpenMC HDF5 statepoint, meshtal, MCTAL, D1SUNED cuvmsh, CSV | `slice`/`render --field`, `read_openmc_tally` | `llevant_scene::field`, `openmc_tallies`, `export_openmc_tally_csv` |
 | An interactive viewer: 3D view and slice, picking, rules, cuts, fields, FMESH layout, card editing | `llevant-viewer`, `llevant view` | `crates/llevant-viewer` |
-| Python: OpenMC/MCNP models in memory, numpy batch queries, inline images, the viewer | `python -m llevant` | `crates/llevant-py` |
+| Python: OpenMC/MCNP/TRIPOLI-4/DRAGON5 in memory, numpy batch queries, QA reports, the viewer | `python -m llevant` | `crates/llevant-py` |
 
 What OpenMC XML and MCNP input is read, and what is not: [`docs/reference/supported-input.md`](docs/reference/supported-input.md).
 
@@ -205,13 +206,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Path | Purpose |
 |---|---|
 | `crates/llevant` | The engine (pure Rust, geometry only) |
-| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`) |
-| `crates/llevant-scene` | What frontends build from a model: cell rules, hidden cells, material looks, field data and tally files, input cards, disk cache |
+| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`, `<plots>`) |
+| `crates/llevant-tripoli` | Pure-Rust TRIPOLI-4 deck translator (`SURF`, `TYPE`, `VOLU`, `ECRASE`, `COMPOSITION`, `GEOMCOMP`) |
+| `crates/llevant-dragon` | Pure-Rust DRAGON5 CLE-2000 `GEO:` translator (`CARCEL`, `TUBE`, `HEXCEL`, `CAR2D`, `CAR3D`, `MIX` checks) |
+| `crates/llevant-scene` | What frontends build from a model: cell rules, hidden cells, material looks and masses, field data and tally files, input cards, disk cache |
 | `crates/llevant-render` | Images: colours, colour scales, field looks, physically based shading, labels, PNG |
 | `crates/llevant-gpu` | The GPU renderer (`wgpu`) |
 | `crates/llevant-viewer` | The `llevant-viewer` desktop app and its `egui` widgets |
-| `crates/llevant-cli` | The `llevant` command |
-| `crates/llevant-py` | The Python module `llevant` (PyO3, abi3 wheels, OpenMC HDF5 tally reader) |
+| `crates/llevant-cli` | The `llevant` command (`convert`, `plots`, `lost`, `volume --mass`, `check --plots`, ...) |
+| `crates/llevant-py` | The Python module `llevant` (PyO3, abi3 wheels, OpenMC HDF5 tally & multi-code helpers) |
 | `tools/bench` | `llevant-bench`: benchmarks, brute-force checks, and GPU vs CPU comparisons |
 | `tools/mcnp-oracle` | Checks `llevant` against MCNP itself |
 | `tools/synthetic` | Generators of benchmark models |
@@ -222,11 +225,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the full setup, test rules, and oracle instructions.
 
 ```sh
-cargo test --release                                 # unit, MCNP golden, property, OpenMC, and CLI tests
-cargo test --release -p llevant-openmc               # OpenMC translator unit tests
-cargo test --release -p llevant --test openmc        # OpenMC engine integration tests
+cargo test --release                                 # unit, MCNP golden, property, OpenMC/TRIPOLI-4/DRAGON5, and CLI tests
+cargo test --release -p llevant-openmc -p llevant-tripoli -p llevant-dragon
+cargo test --release -p llevant --test openmc --test tripoli --test dragon
 cargo test --release -p llevant-gpu -p llevant-viewer # GPU renderer and viewer (skip without an adapter)
-pytest crates/llevant-py/tests/test_openmc.py        # Python OpenMC oracle & HDF5 statepoint tally tests
+pytest crates/llevant-py/tests                       # Python API, multi-code, & HDF5 statepoint tally tests
 cargo run --release -p llevant-bench                 # benchmarks and checks
 ```
 

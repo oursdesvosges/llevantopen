@@ -548,38 +548,102 @@ fn parse_materials(nodes: &[XmlNode]) -> Result<BTreeMap<i64, OpenMcMaterial>, O
     Ok(out)
 }
 
+/// Plot definition parsed from OpenMC `plots.xml` or `<plots>` inside `model.xml`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenMcPlot {
+    pub id: i64,
+    pub filename: String,
+    pub plot_type: String,
+    pub basis: String,
+    pub color_by: String,
+    pub origin: [f64; 3],
+    pub width: [f64; 2],
+    pub pixels: [usize; 2],
+    pub show_overlaps: bool,
+}
+
 /// Convert OpenMC boolean region expression to MCNP syntax.
+///
+/// Handles `&` (intersection), `|` (`:` union), `~(...)` (`#(...)` cell/group
+/// complement), and single-surface complements such as `~-5` -> `5` and `~5` /
+/// `~+5` -> `-5`.
 fn openmc_region_to_mcnp(region: &str) -> String {
-    let mut out = String::with_capacity(region.len() + 8);
-    for c in region.chars() {
-        match c {
-            '|' => {
-                out.push(' ');
+    let bytes = region.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut out = String::with_capacity(len + 8);
+
+    let push_space = |buf: &mut String| {
+        if !buf.is_empty() && !buf.ends_with(' ') && !buf.ends_with('(') && !buf.ends_with('#') {
+            buf.push(' ');
+        }
+    };
+
+    while i < len {
+        let ch = bytes[i];
+        match ch {
+            b'|' => {
+                if !out.ends_with(' ') && !out.ends_with('(') {
+                    out.push(' ');
+                }
                 out.push(':');
                 out.push(' ');
+                i += 1;
             }
-            '~' => {
-                out.push(' ');
-                out.push('#');
+            b'&' | b'+' => {
+                push_space(&mut out);
+                i += 1;
             }
-            '(' => {
+            b'(' => {
                 out.push('(');
+                i += 1;
             }
-            ')' => {
+            b')' => {
                 out.push(')');
+                i += 1;
             }
-            '+' => {
-                // MCNP accepts bare positive surface IDs; omit leading '+' inside expressions
-                if !out.ends_with(' ') && !out.ends_with('(') && !out.ends_with('#') {
-                    out.push(' ');
+            b'~' => {
+                i += 1;
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i < len && bytes[i] == b'(' {
+                    push_space(&mut out);
+                    out.push('#');
+                } else {
+                    // Single surface complement: invert sense (+ <-> -)
+                    let mut neg = false;
+                    if i < len && bytes[i] == b'-' {
+                        neg = true;
+                        i += 1;
+                    } else if i < len && bytes[i] == b'+' {
+                        i += 1;
+                    }
+                    let start = i;
+                    while i < len && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i > start {
+                        push_space(&mut out);
+                        if !neg {
+                            out.push('-');
+                        }
+                        out.push_str(&region[start..i]);
+                    } else {
+                        push_space(&mut out);
+                        out.push('#');
+                    }
                 }
             }
-            _ if c.is_whitespace() => {
-                if !out.ends_with(' ') && !out.ends_with('(') && !out.ends_with('#') {
-                    out.push(' ');
-                }
+            _ if ch.is_ascii_whitespace() => {
+                push_space(&mut out);
+                i += 1;
             }
-            _ => out.push(c),
+            _ => {
+                let c = region[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
         }
     }
     out.trim().to_string()
@@ -786,7 +850,19 @@ pub fn openmc_xml_to_mcnp(
     materials_xml: Option<&str>,
 ) -> Result<String, OpenMcError> {
     let geom_roots = parse_xml_nodes(geometry_or_model_xml)?;
-    let mut materials = parse_materials(&geom_roots)?;
+    let mut mat_containers = Vec::new();
+    collect_elements(&geom_roots, "materials", &mut mat_containers);
+    let mut materials = if !mat_containers.is_empty() {
+        let mut combined = BTreeMap::new();
+        for mc in mat_containers {
+            for (id, mat) in parse_materials(&mc.children)? {
+                combined.insert(id, mat);
+            }
+        }
+        combined
+    } else {
+        parse_materials(&geom_roots)?
+    };
     if let Some(mxml) = materials_xml {
         let mat_roots = parse_xml_nodes(mxml)?;
         for (id, mat) in parse_materials(&mat_roots)? {
@@ -794,9 +870,17 @@ pub fn openmc_xml_to_mcnp(
         }
     }
 
+    let mut geom_containers = Vec::new();
+    collect_elements(&geom_roots, "geometry", &mut geom_containers);
+    let geom_scope: Vec<XmlNode> = if geom_containers.is_empty() {
+        geom_roots.clone()
+    } else {
+        geom_containers.into_iter().cloned().collect()
+    };
+
     // Parse surfaces
     let mut raw_surfs = Vec::new();
-    collect_elements(&geom_roots, "surface", &mut raw_surfs);
+    collect_elements(&geom_scope, "surface", &mut raw_surfs);
     let mut surfaces: BTreeMap<i64, OpenMcSurface> = BTreeMap::new();
     let mut max_surf_id: i64 = 0;
 
@@ -832,7 +916,7 @@ pub fn openmc_xml_to_mcnp(
 
     // Parse lattices
     let mut raw_lats = Vec::new();
-    collect_elements(&geom_roots, "lattice", &mut raw_lats);
+    collect_elements(&geom_scope, "lattice", &mut raw_lats);
     let mut lattices: BTreeMap<i64, OpenMcLattice> = BTreeMap::new();
 
     for lnode in raw_lats {
@@ -885,7 +969,7 @@ pub fn openmc_xml_to_mcnp(
 
     // Parse hexagonal lattices
     let mut raw_hex_lats = Vec::new();
-    collect_elements(&geom_roots, "hex_lattice", &mut raw_hex_lats);
+    collect_elements(&geom_scope, "hex_lattice", &mut raw_hex_lats);
     let mut hex_lattices: BTreeMap<i64, OpenMcHexLattice> = BTreeMap::new();
 
     for lnode in raw_hex_lats {
@@ -984,7 +1068,7 @@ pub fn openmc_xml_to_mcnp(
 
     // Parse cells
     let mut raw_cells = Vec::new();
-    collect_elements(&geom_roots, "cell", &mut raw_cells);
+    collect_elements(&geom_scope, "cell", &mut raw_cells);
     let mut cells: Vec<OpenMcCell> = Vec::new();
     let mut max_cell_id: i64 = 0;
     let mut all_cell_universes: BTreeSet<i64> = BTreeSet::new();
@@ -996,12 +1080,34 @@ pub fn openmc_xml_to_mcnp(
             .ok_or_else(|| OpenMcError::Parse("<cell> missing `id`".into()))?
             .parse()
             .map_err(|_| OpenMcError::Parse("invalid cell id".into()))?;
-        let name = cnode.attr("name").unwrap_or("").to_string();
+        let mut name = cnode.attr("name").unwrap_or("").to_string();
         let material = match cnode.attr("material") {
-            Some(m) if !m.eq_ignore_ascii_case("void") && !m.trim().is_empty() => {
-                m.trim().parse::<i64>().ok()
+            Some(m) => {
+                let toks = m.split_whitespace().collect::<Vec<_>>();
+                let parsed: Vec<Option<i64>> = toks
+                    .iter()
+                    .map(|t| {
+                        if t.eq_ignore_ascii_case("void") {
+                            None
+                        } else {
+                            t.parse::<i64>().ok()
+                        }
+                    })
+                    .collect();
+                let first = parsed.iter().flatten().copied().next();
+                if toks.len() > 1 {
+                    let note = format!("distributed materials: {}", toks.join(" "));
+                    if name.is_empty() {
+                        name = note;
+                    } else {
+                        name.push_str(" (");
+                        name.push_str(&note);
+                        name.push(')');
+                    }
+                }
+                first
             }
-            _ => None,
+            None => None,
         };
         let universe = cnode
             .attr("universe")
@@ -1347,7 +1453,8 @@ pub fn openmc_xml_to_mcnp(
     let mut root_senses: HashMap<i64, (bool, bool)> = HashMap::new();
     for cell in &cells {
         if cell.universe == root_universe {
-            collect_region_surface_senses(&cell.region, &mut root_senses);
+            let reg_mcnp = openmc_region_to_mcnp(&cell.region);
+            collect_region_surface_senses(&reg_mcnp, &mut root_senses);
         }
     }
 
@@ -1564,6 +1671,161 @@ pub fn openmc_xml_to_mcnp(
     }
 
     Ok(mcnp)
+}
+
+/// Parse `<plot>` definitions from an OpenMC `plots.xml` or `model.xml` document.
+pub fn parse_openmc_plots(xml: &str) -> Result<Vec<OpenMcPlot>, OpenMcError> {
+    let roots = parse_xml_nodes(xml)?;
+    let mut raw_plots = Vec::new();
+    collect_elements(&roots, "plot", &mut raw_plots);
+
+    let mut plots = Vec::with_capacity(raw_plots.len());
+    for (idx, pnode) in raw_plots.into_iter().enumerate() {
+        let id = pnode
+            .attr("id")
+            .or_else(|| pnode.child_text("id"))
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or((idx + 1) as i64);
+        let plot_type = pnode
+            .attr("type")
+            .or_else(|| pnode.child_text("type"))
+            .unwrap_or("slice")
+            .trim()
+            .to_ascii_lowercase();
+        let filename = pnode
+            .attr("filename")
+            .or_else(|| pnode.child_text("filename"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("plot_{id}.png"));
+        let basis = pnode
+            .attr("basis")
+            .or_else(|| pnode.child_text("basis"))
+            .unwrap_or("xy")
+            .trim()
+            .to_ascii_lowercase();
+        let color_by = pnode
+            .attr("color_by")
+            .or_else(|| pnode.child_text("color_by"))
+            .or_else(|| pnode.attr("col_by"))
+            .or_else(|| pnode.child_text("col_by"))
+            .unwrap_or("cell")
+            .trim()
+            .to_ascii_lowercase();
+
+        let origin_vec = pnode
+            .attr("origin")
+            .or_else(|| pnode.child_text("origin"))
+            .map(parse_f64_list)
+            .transpose()?
+            .unwrap_or_default();
+        let origin = [
+            origin_vec.first().copied().unwrap_or(0.0),
+            origin_vec.get(1).copied().unwrap_or(0.0),
+            origin_vec.get(2).copied().unwrap_or(0.0),
+        ];
+
+        let width_vec = pnode
+            .attr("width")
+            .or_else(|| pnode.child_text("width"))
+            .map(parse_f64_list)
+            .transpose()?
+            .unwrap_or_else(|| vec![100.0, 100.0]);
+        let width = [
+            width_vec.first().copied().unwrap_or(100.0),
+            width_vec
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| width_vec.first().copied().unwrap_or(100.0)),
+        ];
+
+        let pixels_raw = pnode
+            .attr("pixels")
+            .or_else(|| pnode.child_text("pixels"))
+            .unwrap_or("800 800");
+        let pixels_vec: Vec<usize> = pixels_raw
+            .split_whitespace()
+            .map(|t| {
+                t.parse::<usize>()
+                    .map_err(|_| OpenMcError::Parse(format!("invalid <pixels> value `{t}`")))
+            })
+            .collect::<Result<_, _>>()?;
+        let pixels = [
+            pixels_vec.first().copied().unwrap_or(800).max(1),
+            pixels_vec
+                .get(1)
+                .copied()
+                .unwrap_or_else(|| pixels_vec.first().copied().unwrap_or(800))
+                .max(1),
+        ];
+
+        let show_overlaps = pnode
+            .attr("show_overlaps")
+            .or_else(|| pnode.child_text("show_overlaps"))
+            .is_some_and(|s| {
+                matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+            });
+
+        plots.push(OpenMcPlot {
+            id,
+            filename,
+            plot_type,
+            basis,
+            color_by,
+            origin,
+            width,
+            pixels,
+            show_overlaps,
+        });
+    }
+    Ok(plots)
+}
+
+/// Read `<plot>` specifications for `model_path`: checks `explicit_plots` if provided,
+/// otherwise looks for `<plots>` inside `model.xml` or a sibling `plots.xml` file.
+pub fn read_openmc_plots(
+    model_path: &Path,
+    explicit_plots: Option<&Path>,
+) -> Result<Vec<OpenMcPlot>, OpenMcError> {
+    if let Some(p) = explicit_plots {
+        let text = fs::read_to_string(p).map_err(|source| OpenMcError::Io {
+            path: p.to_path_buf(),
+            source,
+        })?;
+        return parse_openmc_plots(&text);
+    }
+
+    let mut out = Vec::new();
+    let candidate_model = if model_path.is_dir() {
+        model_path.join("model.xml")
+    } else {
+        model_path.to_path_buf()
+    };
+    if candidate_model.is_file() {
+        if let Ok(text) = fs::read_to_string(&candidate_model) {
+            if let Ok(found) = parse_openmc_plots(&text) {
+                out.extend(found);
+            }
+        }
+    }
+    if out.is_empty() {
+        let sibling_plots = if model_path.is_dir() {
+            model_path.join("plots.xml")
+        } else {
+            model_path
+                .parent()
+                .map_or_else(|| PathBuf::from("plots.xml"), |d| d.join("plots.xml"))
+        };
+        if sibling_plots.is_file() {
+            let text = fs::read_to_string(&sibling_plots).map_err(|source| OpenMcError::Io {
+                path: sibling_plots,
+                source,
+            })?;
+            out.extend(parse_openmc_plots(&text)?);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1793,5 +2055,42 @@ mod tests {
                 "missing `{term}` in graveyard: {grave_line}"
             );
         }
+    }
+
+    #[test]
+    fn converts_single_surface_complements_distributed_materials_and_plots() {
+        let xml = r#"<model>
+  <materials>
+    <material id="1"><density units="g/cm3" value="10.0"/><nuclide ao="1.0" name="U235"/></material>
+    <material id="2"><density units="g/cm3" value="1.0"/><nuclide ao="2.0" name="H1"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="sphere" coeffs="0 0 0 3.0"/>
+    <surface id="2" type="sphere" coeffs="0 0 0 8.0" boundary="vacuum"/>
+    <cell id="1" material="1 2" region="~+1 &amp; -2" name="Fuel Zone"/>
+  </geometry>
+  <plots>
+    <plot id="7" filename="core_xy.png" color_by="material" type="slice" basis="xy">
+      <origin>0.0 0.0 0.5</origin>
+      <width>20.0 20.0</width>
+      <pixels>400 400</pixels>
+      <show_overlaps>true</show_overlaps>
+    </plot>
+  </plots>
+</model>"#;
+        let mcnp = openmc_xml_to_mcnp(xml, None).unwrap();
+        assert!(mcnp.contains("1 1 -10 -1 -2 imp:n=1"), "{mcnp}");
+        assert!(mcnp.contains("distributed materials: 1 2"), "{mcnp}");
+
+        let plots = parse_openmc_plots(xml).unwrap();
+        assert_eq!(plots.len(), 1);
+        assert_eq!(plots[0].id, 7);
+        assert_eq!(plots[0].filename, "core_xy.png");
+        assert_eq!(plots[0].basis, "xy");
+        assert_eq!(plots[0].color_by, "material");
+        assert_eq!(plots[0].origin, [0.0, 0.0, 0.5]);
+        assert_eq!(plots[0].width, [20.0, 20.0]);
+        assert_eq!(plots[0].pixels, [400, 400]);
+        assert!(plots[0].show_overlaps);
     }
 }

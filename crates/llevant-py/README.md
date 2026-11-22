@@ -1,17 +1,16 @@
 # llevant
 
-Fast, exact geometry queries on MCNP models, from Python or the command line.
+Fast, exact geometry queries on MCNP, OpenMC XML, TRIPOLI-4, and DRAGON5 models, from Python or the command line.
 llevant answers:
 
 - where points are, and what lines cross;
-- slices and 3D views;
-- volumes, and the gaps and overlaps of a model;
-- fingerprints that tell two versions of a model apart.
+- slices, OpenMC `<plots>`, and 3D views;
+- volumes, masses (`Group.mass`, `mass_balance`), gaps and overlaps (`check`, `check_report`), and lost-particle diagnosis (`diagnose_lost_particles`);
+- fingerprints that tell two versions of a model apart;
+- multi-code conversion to MCNP (`to_mcnp`, `tripoli_to_mcnp`, `dragon_to_mcnp`) and OpenMC HDF5 statepoint tally loading (`openmc_tallies`, `read_openmc_tally`, `export_openmc_tally_csv`).
 
-It reads the MCNP input and handles every universe level, lattice and transform.
-It is checked point by point against MCNP 6.2. The Python module is built on the
-Rust engine of the same name: models are compiled once (and cached on disk), then
-queried in numpy batches.
+It reads MCNP inputs, OpenMC XML (`from_openmc`), TRIPOLI-4 (`from_tripoli`), and DRAGON5 `GEO:` (`from_dragon`), handling every universe level, lattice and transform.
+The Python module is built on the Rust engine of the same name: models are compiled once (and cached on disk), then queried in numpy batches.
 
 ![The viewer: a reactor core cut open in 3D, beside an exact slice through its fuel pins](https://raw.githubusercontent.com/Fusion4Energy/llevant/main/docs/img/viewer.png)
 

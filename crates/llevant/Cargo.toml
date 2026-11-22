@@ -19,7 +19,9 @@ bench = []
 [dependencies]
 bitcode = { version = "0.6.9", features = ["serde"] }
 blake3 = { workspace = true, features = ["rayon"] }
+llevant-dragon.workspace = true
 llevant-openmc.workspace = true
+llevant-tripoli.workspace = true
 log.workspace = true
 migjorn.workspace = true
 # Not used directly: pins migjorn's own dependency (see the workspace).

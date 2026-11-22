@@ -9,11 +9,14 @@
 
 mod args;
 mod common;
+mod convert;
 mod field;
 mod fingerprint;
 mod info;
 mod json;
 mod locate;
+mod lost;
+mod plots;
 mod render;
 mod slice;
 mod view;
@@ -27,7 +30,7 @@ use args::{Format, Open};
 #[command(
     name = "llevant",
     version,
-    about = "Fast, exact queries on MCNP geometry"
+    about = "Fast, exact queries on MCNP, OpenMC, TRIPOLI-4, and DRAGON5 geometry"
 )]
 struct Cli {
     /// Worker threads (default: all cores).
@@ -56,12 +59,18 @@ enum Cmd {
     Trace(locate::TraceArgs),
     /// Image of a plane through the geometry (exact boundaries along rows).
     Slice(slice::SliceArgs),
+    /// Render OpenMC <plot> slice definitions directly to PNG images.
+    Plots(plots::PlotsArgs),
     /// 3D view: first visible cell along each pixel's ray, shaded.
     Render(render::RenderArgs),
     /// What each material looks like in realistic images: the categories
     /// its composition sorts into (steel, concrete, water...) and its colour,
     /// roughness, metalness and clarity.
     Materials(info::MaterialsArgs),
+    /// Translate OpenMC XML, TRIPOLI-4, or DRAGON5 inputs into MCNP syntax.
+    Convert(convert::ConvertArgs),
+    /// Diagnose lost-particle coordinates against any supported input model.
+    Lost(lost::LostArgs),
     /// Digests of every cell and universe that ignore numbering and card order.
     Fingerprint(fingerprint::FingerprintArgs),
     /// Interactive viewer: 3D view and 2D slices in a window.
@@ -128,11 +137,14 @@ impl Cmd {
             Cmd::Bbox(a) => a.format,
             Cmd::Locate(a) => a.format,
             Cmd::Trace(a) => a.format,
+            Cmd::Lost(a) => a.format,
             Cmd::Materials(a) => a.format,
             Cmd::Volume(a) => a.format,
             Cmd::Check(a) => a.format,
             Cmd::Fingerprint(a) => return a.format == Format::Json || !a.diffs(),
-            Cmd::Slice(_) | Cmd::Render(_) | Cmd::View(_) => return false,
+            Cmd::Convert(_) | Cmd::Plots(_) | Cmd::Slice(_) | Cmd::Render(_) | Cmd::View(_) => {
+                return false
+            }
         };
         f == Format::Json
     }
@@ -145,8 +157,11 @@ fn run(cmd: Cmd, open: &Open) -> Result<u8, String> {
         Cmd::Locate(a) => a.run(open),
         Cmd::Trace(a) => a.run(open),
         Cmd::Slice(a) => a.run(open),
+        Cmd::Plots(a) => a.run(open),
         Cmd::Render(a) => a.run(open),
         Cmd::Materials(a) => a.run(open),
+        Cmd::Convert(a) => a.run(open),
+        Cmd::Lost(a) => a.run(open),
         Cmd::Fingerprint(a) => a.run(open),
         Cmd::View(a) => a.run(open),
         Cmd::Volume(a) => a.run(open),

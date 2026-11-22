@@ -126,10 +126,7 @@ impl Store {
         progress.set_stage("reading");
         let read_input = || {
             let t = Instant::now();
-            let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
-                llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
-                other => Error::Invalid(other.to_string()),
-            })?;
+            let bytes = llevant::read_input_bytes(path)?;
             if progress.cancelled() {
                 return Err(Error::Cancelled);
             }

@@ -343,6 +343,16 @@ impl Model {
             .ok_or_else(|| invalid(format!("path `{path}` has no instance id")))
     }
 
+    /// Global instance ids (`Label.instance`) for every occurrence of cell
+    /// `cell_id` in instance-index order. KeyError if there is no such cell.
+    fn cell_instances(&self, cell_id: i64) -> PyResult<Vec<u64>> {
+        let m = &self.inner;
+        let idx = m
+            .cell_index(cell_id)
+            .ok_or_else(|| PyKeyError::new_err(cell_id))?;
+        Ok(m.instances().ids(idx).collect())
+    }
+
     /// Problems found while compiling (unsupported features, undefined
     /// references...).
     #[getter]
@@ -959,7 +969,7 @@ impl Model {
                 )
             })
             .map_err(err)?;
-        converged_groups(py, &self.inner, c)
+        converged_groups(py, &self.inner, target.by, c)
     }
 
     /// Volumes of the cells `cells` (MCNP numbers) alone, in that order:
@@ -1007,7 +1017,7 @@ impl Model {
         let c = py
             .detach(|| m.cell_volumes(&idx, &target, None))
             .map_err(err)?;
-        converged_groups(py, &self.inner, c)
+        converged_groups(py, &self.inner, llevant::GroupBy::Cell, c)
     }
 
     /// Digests of every cell and universe that ignore numbering and card
@@ -1140,14 +1150,17 @@ impl Model {
 fn converged_groups(
     py: Python<'_>,
     m: &llevant::Model,
+    by: llevant::GroupBy,
     c: llevant::Converged,
 ) -> PyResult<Vec<Group>> {
+    let looks = Looks::new(m, &[]).map_err(err)?;
     c.groups
         .iter()
         .enumerate()
         .map(|(i, g)| {
             let has = |v: &[usize]| v.binary_search(&i).is_ok();
             let inside = g.status == llevant::Status::Inside;
+            let mass = llevant_scene::materials::group_mass(m, &looks, by, g, None);
             Ok(Group {
                 converged: inside.then(|| !has(&c.unconverged)),
                 outcome: inside.then(|| {
@@ -1161,7 +1174,7 @@ fn converged_groups(
                         "converged"
                     }
                 }),
-                ..Group::of(py, m, g, c.h[i])?
+                ..Group::of(py, m, g, c.h[i], mass)?
             })
         })
         .collect()

@@ -28,6 +28,8 @@ def _groups(v, by):
         "status": [g.status for g in rows],
         "volume": [g.volume for g in rows],
         "sigma": [g.sigma for g in rows],
+        "mass_g": [g.mass for g in rows],
+        "mass_sigma_g": [g.mass_sigma for g in rows],
         "segments": [g.segments for g in rows],
         "probes_hit": [g.probes_hit for g in rows],
         "x0": [b[0][0] for b in box],

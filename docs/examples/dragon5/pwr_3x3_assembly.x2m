@@ -1,0 +1,27 @@
+* ------------------------------------------------------------
+* DRAGON5 3x3 PWR lattice assembly with central guide tube
+* and eight annular UO2 fuel pins
+* ------------------------------------------------------------
+LINKED_LIST ASS ;
+MODULE GEO: ;
+
+ASS := GEO: :: CAR2D 3 3
+  X- REFL X+ REFL
+  Y- REFL Y+ REFL
+  CELL
+    PIN  PIN  PIN
+    PIN  GT   PIN
+    PIN  PIN  PIN
+  ::: PIN := GEO: CARCEL 2
+    MESHX 0.0 1.26
+    MESHY 0.0 1.26
+    RADIUS 0.0 0.4096 0.4750
+    MIX 1 2 3
+  ;
+  ::: GT := GEO: CARCEL 1
+    MESHX 0.0 1.26
+    MESHY 0.0 1.26
+    RADIUS 0.0 0.5610
+    MIX 2 3
+  ;
+;

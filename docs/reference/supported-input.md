@@ -1,9 +1,11 @@
-# Supported MCNP and OpenMC input
+# Supported MCNP, OpenMC, TRIPOLI-4, and DRAGON5 input
 
 llevant reads MCNP inputs through [migjorn](https://crates.io/crates/migjorn), and
 follows MCNP 6.2 wherever the two could differ: it has been checked point by point
-against MCNP itself ([how](../mcnp-behaviour.md)). It also reads OpenMC XML models
-directly in pure Rust (`llevant-openmc`).
+against MCNP itself ([how](../mcnp-behaviour.md)). It also reads OpenMC XML,
+TRIPOLI-4, and DRAGON5 `GEO:` inputs natively in pure Rust (`llevant-openmc`,
+`llevant-tripoli`, `llevant-dragon`), and converts any of them to MCNP syntax with
+`llevant convert` or `llevant.to_mcnp`.
 
 ## Geometry
 
@@ -78,12 +80,43 @@ with zero OpenMC runtime dependency:
   `kg/m3`, `atom/b-cm`, `atom/cm3`, `sum`), plus cell `name="..."` attributes exposed
   to `label "..."` queries.
 - **Results (`read_openmc_tally`)**: in Python ([the Python guide](../guide/python.md)),
-  `llevant.read_openmc_tally(model, "statepoint.h5")` loads `cell`, `material`, and
-  `mesh` (`RegularMesh`, `RectilinearMesh`, `CylindricalMesh`) tallies directly from
-  OpenMC HDF5 statepoints (when `h5py` is installed).
+  `llevant.openmc_tallies("statepoint.h5")` inspects tally metadata and
+  `llevant.read_openmc_tally(model, "statepoint.h5", ...)` loads `cell`, `material`,
+  `cellinstance`, `distribcell`, and `mesh` (`RegularMesh`, `RectilinearMesh`,
+  `CylindricalMesh`) tallies with `score`, `nuclide`, `energy`, and `particle`
+  selection (when `h5py` is installed). `llevant plots` renders OpenMC `<plots>` XML
+  definitions directly to PNGs.
 
 Examples: `docs/examples/openmc/fusion_hts_blanket.xml`, `pwr_pin_lattice.xml`, and
 `vver_hex_assembly.xml`.
+
+## TRIPOLI-4 input
+
+llevant translates native TRIPOLI-4 geometry decks (`llevant-tripoli`, extensions
+`.t4`, `.tripoli`, `.t4g` or `GEOMETRY`/`SURF`/`VOLU` keywords):
+
+- **Surfaces & transforms**: `PLANEX/Y/Z`, `PLANE`, `SPHERE`, `CYLX/Y/Z`, `CYL`,
+  `CONEX/Y/Z`, `CONE`, `QUAD`, `TORUSX/Y/Z`, and `TRANSFORM ... MATRIX`.
+- **Macro-shapes & CSG**: `TYPE ... BOX/BOITE/SPHERE/CYLINDRE/HEXAG/COMBI`, `VOLU ...
+  EQUA` (`PLUS`, `MINUS`/`MOINS`, `INTE`, `UNION`, `VPLUS`, `VMOINS`, `FICTIVE`) and
+  `COMBI`, with priority overlaps (`ECRASE`) expanded cleanly and non-fictive
+  exterior `IMP:N=0` graveyards synthesized automatically.
+- **Materials & boundaries**: `COMPOSITION` (`DENSITY`, `POINT_WISE`, `NB_ATOM`,
+  `POURCENTAGE_MASSIQUE`), `GEOMCOMP`, and `BOUNDARY_CONDITION`/`LIMITE`.
+
+Examples: `docs/examples/tripoli4/pwr_pin_cell.t4` and `fusion_shield_box.t4`.
+
+## DRAGON5 CLE-2000 input
+
+llevant translates DRAGON5 `GEO:` geometry blocks (`llevant-dragon`, extensions
+`.x2m`, `.c2m`, `.dragon`, `.d5` or `:= GEO:` blocks):
+
+- **Cells & lattices**: `CARCEL`, `TUBE`, `HEXCEL`, `CAR2D`, `CAR3D`, and inline
+  sub-geometries `::: SUB := GEO: ... ;`.
+- **Validation**: validates `MIX` material assignment counts against rings/sectors
+  (catching common `SPLITR` mismatches up front).
+
+Example: `docs/examples/dragon5/pwr_3x3_assembly.x2m`.
 
 ## Labels
 

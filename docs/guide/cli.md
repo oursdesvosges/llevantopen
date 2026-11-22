@@ -24,7 +24,12 @@ llevant slice  model.mcnp --plane z=37 --field heat.csv --outline-by material -o
 llevant render model.mcnp --field run.msht --tally 14 --log -o flux.png # an FMESH tally
 llevant view   model.mcnp                     # the viewer (feature `viewer`)
 llevant view                                  # its start screen: open a model from it
-llevant check  model.xml --h 1.0              # OpenMC XML models work with every command
+llevant check  model.xml --h 1.0              # OpenMC XML, TRIPOLI-4, and DRAGON5 work with every command
+llevant volume model.xml --h 1 --by material --mass  # include mass (g) and mass uncertainty
+llevant check  model.i --h 0.5 --plots qa_out # write defect PNGs, report.json, and report.md
+llevant convert deck.t4 --verify -o deck.i    # translate OpenMC/TRIPOLI-4/DRAGON5 to MCNP
+llevant plots  model.xml -O plots_out         # render OpenMC <plot> slices directly to PNGs
+llevant lost   model.i --log mcnp.outp --plots lost_out  # diagnose lost-particle logs
 ```
 
 ## Regions, labels and levels
@@ -213,8 +218,9 @@ What each command gives:
 |---|---|
 | `locate` | One label per point, with its `point` |
 | `trace` | One entry per line: `from`, `to` and `segments`, each with `t0`, `t1`, `length` (cm along the line), `surface_in`, `surface_out` and `label` |
-| `check` | One row per gap or overlap, largest first: its `label`, `volume`, `sigma` (cm³) and `box` |
-| `volume` | One row per group: its number under `cell`, `material` or `universe` (`null` for gaps and overlaps), `name`, `status`, `label` (for a group that is one label: gaps, overlaps, every group of `--by label`; else `null`), `volume`, `sigma` and `box`; with `--rel-sigma`, `h`, `converged` and `outcome` |
+| `check` | One row per gap or overlap, largest first: its `label`, `volume`, `sigma` (cm³) and `box` (with `--plots DIR`, writes `report.json`, `report.md`, and XY/XZ/YZ defect PNGs) |
+| `volume` | One row per group: its number under `cell`, `material` or `universe` (`null` for gaps and overlaps), `name`, `status`, `label` (for a group that is one label: gaps, overlaps, every group of `--by label`; else `null`), `volume`, `sigma`, `mass_g`, `mass_sigma_g`, and `box`; with `--rel-sigma`, `h`, `converged` and `outcome` |
+| `lost` | One entry per point (from coordinates, `--point`, or `--log`): `point`, `label`, `nearest_surface`, `nearest_distance`, `diagnosis`, `nearby_defects`, and `plots` (with `--plots DIR`) |
 | `bbox` | `box` around all the cells, and the `box` of each instance |
 | `fingerprint --diff` | `same`, and for `cells` and `universes`: `unchanged` (a count), and the numbers that changed `content` or `geometry`, were `renumbered` (`{"from", "to"}`), `removed` or are `new` |
 | `info`, `materials`, `fingerprint` | The model's sizes, extent and diagnostics; each material's look; each cell's and universe's digests |

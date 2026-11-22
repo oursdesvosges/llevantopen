@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use llevant::{Error, Result};
+use llevant::Result;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -78,19 +78,15 @@ impl Labels {
     }
 
     /// The labels of the input at `path` (parsed again: the compiled model
-    /// has no text). Supports MCNP decks and OpenMC XML models/directories.
+    /// has no text). Supports MCNP, OpenMC XML, TRIPOLI-4, and DRAGON5 inputs.
     pub fn read(path: impl AsRef<Path>) -> Result<Labels> {
-        let path = path.as_ref();
-        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
-            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
-            other => Error::Invalid(other.to_string()),
-        })?;
+        let bytes = llevant::read_input_bytes(path.as_ref())?;
         Ok(Labels::of_text(&String::from_utf8_lossy(&bytes)))
     }
 
-    /// The labels of input text (MCNP or OpenMC XML).
+    /// The labels of input text (MCNP, OpenMC XML, TRIPOLI-4, or DRAGON5).
     pub fn of_text(text: &str) -> Labels {
-        match llevant_openmc::maybe_translate_bytes(text.as_bytes()) {
+        match llevant::translate_input_bytes(text.as_bytes()) {
             Ok(std::borrow::Cow::Owned(bytes)) => {
                 Labels::of(&migjorn::Model::parse(&String::from_utf8_lossy(&bytes)))
             }

@@ -1086,3 +1086,223 @@ fn label_rules() {
         "{err}"
     );
 }
+
+fn examples() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("docs/examples")
+}
+
+#[test]
+fn volume_mass_reports_text_csv_and_json() {
+    let t4 = examples().join("tripoli4/pwr_pin_cell.t4");
+    let t4 = t4.to_str().unwrap();
+
+    let o = llevant(&["volume", t4, "--h", "0.2", "--by", "material", "--mass"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    assert!(
+        out.contains("mass (g)") && out.contains("mass_sigma"),
+        "{out}"
+    );
+
+    let o = llevant(&[
+        "volume", t4, "--h", "0.2", "--by", "material", "--mass", "--format", "csv",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let csv = stdout(&o);
+    assert!(
+        csv.starts_with("material,volume,sigma,segments,probes_hit,mass_g,mass_sigma_g\n"),
+        "{csv}"
+    );
+
+    let o = llevant(&[
+        "volume", t4, "--h", "0.2", "--by", "material", "--format", "json",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let rows: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert!(arr.iter().any(|r| {
+        r["material"] == 1
+            && r["mass_g"].as_f64().is_some_and(|m| m > 0.0)
+            && r["mass_sigma_g"].as_f64().is_some_and(|s| s >= 0.0)
+    }));
+}
+
+#[test]
+fn check_plots_writes_report_and_pngs() {
+    let defect_dir = tmp("check_plots_defect");
+    let _ = std::fs::remove_dir_all(&defect_dir);
+    let periodic = models().join("periodic.i");
+    let o = llevant(&[
+        "check",
+        periodic.to_str().unwrap(),
+        "--h",
+        "0.5",
+        "--plots",
+        defect_dir.to_str().unwrap(),
+        "--px",
+        "64",
+    ]);
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let rjson: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(defect_dir.join("report.json")).unwrap())
+            .unwrap();
+    let arr = rjson.as_array().unwrap();
+    assert!(!arr.is_empty());
+    let plots = arr[0]["plots"].as_array().unwrap();
+    assert_eq!(plots.len(), 3);
+    for fname in plots {
+        let bytes = std::fs::read(defect_dir.join(fname.as_str().unwrap())).unwrap();
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+    let md = std::fs::read_to_string(defect_dir.join("report.md")).unwrap();
+    assert!(
+        md.contains("overlap") && md.contains("defect_001_xy.png"),
+        "{md}"
+    );
+
+    let clean_dir = tmp("check_plots_clean");
+    let _ = std::fs::remove_dir_all(&clean_dir);
+    let surfaces = models().join("surfaces.i");
+    let o = llevant(&[
+        "check",
+        surfaces.to_str().unwrap(),
+        "--h",
+        "1",
+        "--plots",
+        clean_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(o.status.code(), Some(0));
+    let md = std::fs::read_to_string(clean_dir.join("report.md")).unwrap();
+    assert!(md.contains("No gaps or overlaps found."), "{md}");
+}
+
+#[test]
+fn convert_translates_tripoli_and_dragon_with_verify() {
+    let t4 = examples().join("tripoli4/pwr_pin_cell.t4");
+    let out_mcnp = tmp("converted_t4.i");
+    let o = llevant(&[
+        "convert",
+        t4.to_str().unwrap(),
+        "--verify",
+        "-o",
+        out_mcnp.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let txt = std::fs::read_to_string(&out_mcnp).unwrap();
+    assert!(txt.contains("imp:n=1") && txt.contains("imp:n=0"), "{txt}");
+
+    let d5 = examples().join("dragon5/pwr_3x3_assembly.x2m");
+    let o = llevant(&["convert", d5.to_str().unwrap(), "--verify"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    assert!(out.contains("lat=1") && out.contains("imp:n=1"), "{out}");
+}
+
+#[test]
+fn plots_renders_openmc_plots_xml() {
+    let openmc_model = examples().join("openmc/fusion_hts_blanket.xml");
+    let plots_xml = tmp("cli_plots.xml");
+    std::fs::write(
+        &plots_xml,
+        r#"<?xml version="1.0"?>
+<plots>
+  <plot id="1" type="slice" basis="xy" color_by="material" filename="hts_xy">
+    <origin>0 0 0</origin>
+    <width>400 400</width>
+    <pixels>64 64</pixels>
+  </plot>
+  <plot id="2" type="slice" basis="xz" color_by="cell" filename="hts_xz.png">
+    <origin>0 0 0</origin>
+    <width>400 300</width>
+    <pixels>64 48</pixels>
+  </plot>
+</plots>
+"#,
+    )
+    .unwrap();
+    let out_dir = tmp("cli_plots_out");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let o = llevant(&[
+        "plots",
+        openmc_model.to_str().unwrap(),
+        "--plots-xml",
+        plots_xml.to_str().unwrap(),
+        "-O",
+        out_dir.to_str().unwrap(),
+        "--outlines",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    for name in ["hts_xy.png", "hts_xz.png"] {
+        let bytes = std::fs::read(out_dir.join(name)).unwrap();
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+}
+
+#[test]
+fn lost_diagnoses_coordinates_and_log_with_plots() {
+    let model_path = tmp("lost_test_model.i");
+    std::fs::write(
+        &model_path,
+        "\
+lost particle test
+1 1 -7.8 -1 imp:n=1
+2 2 -1.0 -2 imp:n=1
+3 0 3 imp:n=0
+
+1 rpp -2 2 -2 2 -2 2
+2 rpp 1 5 -2 2 -2 2
+3 rpp -10 10 -10 10 -10 10
+
+mode n
+m1 26000 1.0
+m2 1001 2.0 8016 1.0
+",
+    )
+    .unwrap();
+
+    let log_path = tmp("lost_mcnp_openmc.log");
+    std::fs::write(
+        &log_path,
+        "\
+1   x, y, z =     1.50000E+00   0.00000E+00   0.00000E+00
+WARNING: Particle 7 became lost at (-4.0, 0.0, 0.0)
+0.0 0.0 0.0
+",
+    )
+    .unwrap();
+
+    let plot_dir = tmp("lost_plots_out");
+    let _ = std::fs::remove_dir_all(&plot_dir);
+    let o = llevant(&[
+        "lost",
+        model_path.to_str().unwrap(),
+        "--log",
+        log_path.to_str().unwrap(),
+        "--radius",
+        "1.0",
+        "--plots",
+        plot_dir.to_str().unwrap(),
+        "--px",
+        "64",
+        "--format",
+        "json",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let rows: serde_json::Value = serde_json::from_str(&stdout(&o)).unwrap();
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 3, "{rows}");
+    assert_eq!(arr[0]["label"]["status"], "overlap");
+    assert_eq!(arr[1]["label"]["status"], "gap");
+    assert_eq!(arr[2]["label"]["status"], "inside");
+    for fname in arr[0]["plots"].as_array().unwrap() {
+        let bytes = std::fs::read(plot_dir.join(fname.as_str().unwrap())).unwrap();
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+}

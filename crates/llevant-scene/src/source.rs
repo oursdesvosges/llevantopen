@@ -14,7 +14,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{RwLock, RwLockReadGuard};
 
-use llevant::{Error, Result};
+use llevant::Result;
 
 mod fields;
 mod many;
@@ -140,20 +140,16 @@ impl std::fmt::Debug for Source {
 }
 
 impl Source {
-    /// Read the input at `path` (supports MCNP decks and OpenMC XML models/directories).
+    /// Read the input at `path` (supports MCNP, OpenMC XML, TRIPOLI-4, and DRAGON5 inputs).
     pub fn load(path: impl AsRef<Path>) -> Result<Source> {
-        let path = path.as_ref();
-        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
-            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
-            other => Error::Invalid(other.to_string()),
-        })?;
+        let bytes = llevant::read_input_bytes(path.as_ref())?;
         Ok(Source::from_str(&String::from_utf8_lossy(&bytes)))
     }
 
-    /// The cards of input text (MCNP or OpenMC XML).
+    /// The cards of input text (MCNP, OpenMC XML, TRIPOLI-4, or DRAGON5).
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Source {
-        match llevant_openmc::maybe_translate_bytes(text.as_bytes()) {
+        match llevant::translate_input_bytes(text.as_bytes()) {
             Ok(std::borrow::Cow::Owned(bytes)) => {
                 Source::from_tree(migjorn::Model::parse(&String::from_utf8_lossy(&bytes)))
             }

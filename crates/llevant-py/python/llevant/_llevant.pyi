@@ -21,6 +21,11 @@ __all__ = [
     "main",
     "load",
     "from_text",
+    "_translate_path",
+    "_translate_text",
+    "_read_openmc_plots",
+    "_tripoli_to_mcnp",
+    "_dragon_to_mcnp",
     "set_threads",
     "threads",
     "Model",
@@ -69,6 +74,24 @@ def from_text(
     grid: Literal["auto", "always", "off"] = "auto",
 ) -> Model:
     """Compile MCNP input text."""
+
+def _translate_path(path: Union[str, PathLike[str]]) -> str:
+    """Read and translate an input file or OpenMC directory to MCNP text."""
+
+def _translate_text(text: str) -> str:
+    """Translate input text (OpenMC, TRIPOLI-4, DRAGON5, or MCNP) to MCNP text."""
+
+def _read_openmc_plots(
+    model_path: Union[str, PathLike[str]],
+    plots_xml: Optional[Union[str, PathLike[str]]] = None,
+) -> list[dict[str, Any]]:
+    """Read OpenMC `<plot>` slice/voxel metadata from a model path or `plots.xml`."""
+
+def _tripoli_to_mcnp(text: str) -> str:
+    """Translate native TRIPOLI-4 input text directly into canonical MCNP text."""
+
+def _dragon_to_mcnp(text: str) -> str:
+    """Translate native DRAGON5 CLE-2000 `GEO:` text directly into canonical MCNP text."""
 
 def set_threads(n: int) -> None:
     """Use `n` worker threads; only before the first query."""
@@ -374,6 +397,8 @@ class Group:
     label: Optional[Label]
     volume: float
     sigma: float
+    mass: Optional[float]
+    mass_sigma: Optional[float]
     by_probe: list[float]
     segments: int
     probes_hit: int
@@ -587,6 +612,10 @@ class Model:
         """The instance id of a path written as `instance_path` writes it
         (lattice elements with one to three indices). ValueError if the
         model has no such path.
+        """
+    def cell_instances(self, cell_id: int) -> list[int]:
+        """Global instance ids for every occurrence of cell `cell_id` in
+        instance-index order. KeyError if there is no such cell.
         """
     @property
     def diagnostics(self) -> list[Diagnostic]:

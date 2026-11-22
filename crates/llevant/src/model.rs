@@ -274,10 +274,60 @@ pub struct Stats {
     pub pending_units: usize,
 }
 
+/// Translate raw input bytes from OpenMC XML, TRIPOLI-4, or DRAGON5 (`GEO:`)
+/// into canonical MCNP bytes, or borrow raw MCNP bytes untouched with zero allocation.
+pub fn translate_input_bytes(input: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
+    if llevant_openmc::is_openmc_bytes(input) {
+        return llevant_openmc::maybe_translate_bytes(input)
+            .map_err(|e| Error::Invalid(e.to_string()));
+    }
+    if llevant_tripoli::is_tripoli_bytes(input) {
+        return llevant_tripoli::maybe_translate_bytes(input)
+            .map_err(|e| Error::Invalid(e.to_string()));
+    }
+    if llevant_dragon::is_dragon_bytes(input) {
+        return llevant_dragon::maybe_translate_bytes(input)
+            .map_err(|e| Error::Invalid(e.to_string()));
+    }
+    Ok(std::borrow::Cow::Borrowed(input))
+}
+
+/// Read an input file or OpenMC model directory (OpenMC XML, TRIPOLI-4,
+/// DRAGON5 `GEO:`, or MCNP) and return canonical MCNP-compatible bytes.
+pub fn read_input_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
+    if llevant_openmc::is_openmc_path(path) {
+        return llevant_openmc::read_input_bytes(path).map_err(|e| match e {
+            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
+        });
+    }
+    if llevant_tripoli::is_tripoli_path(path) {
+        return llevant_tripoli::read_input_bytes(path).map_err(|e| match e {
+            llevant_tripoli::TripoliError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
+        });
+    }
+    if llevant_dragon::is_dragon_path(path) {
+        return llevant_dragon::read_input_bytes(path).map_err(|e| match e {
+            llevant_dragon::DragonError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    match translate_input_bytes(&bytes)? {
+        std::borrow::Cow::Owned(v) => Ok(v),
+        std::borrow::Cow::Borrowed(_) => Ok(bytes),
+    }
+}
+
 impl Model {
-    /// Read and compile an MCNP input file. With `progress`, each step is
-    /// named in it as it starts (parsing, then the steps of compiling), and
-    /// loading stops with [`Error::Cancelled`] between steps once cancelled.
+    /// Read and compile an MCNP, OpenMC XML, TRIPOLI-4, or DRAGON5 input file.
+    /// With `progress`, each step is named in it as it starts (parsing, then
+    /// the steps of compiling), and loading stops with [`Error::Cancelled`]
+    /// between steps once cancelled.
     pub fn load(
         path: impl AsRef<std::path::Path>,
         opts: &Options,
@@ -285,10 +335,7 @@ impl Model {
     ) -> Result<Model> {
         let t = Instant::now();
         let path = path.as_ref();
-        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
-            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
-            other => Error::Invalid(other.to_string()),
-        })?;
+        let bytes = read_input_bytes(path)?;
         let read = t.elapsed().as_secs_f64();
         let mut m = Model::compile(&bytes, opts, progress)?;
         m.timings.insert(0, ("read", read));
@@ -422,8 +469,7 @@ impl Model {
         };
         stop()?;
         progress.set_stage("parsing");
-        let translated = llevant_openmc::maybe_translate_bytes(input)
-            .map_err(|e| Error::Invalid(e.to_string()))?;
+        let translated = translate_input_bytes(input)?;
         let text = String::from_utf8_lossy(&translated);
         let t = Instant::now();
         let parsed = migjorn::Model::parse(&text);
@@ -458,12 +504,12 @@ impl Model {
         Ok((m, changes.expect("a recompile reports its changes")))
     }
 
-    /// Compile MCNP or OpenMC XML input text. It never fails: what MCNP would
-    /// reject, and what llevant does not support, is listed in [`Model::diagnostics`].
+    /// Compile MCNP, OpenMC XML, TRIPOLI-4, or DRAGON5 input text. It never
+    /// fails: what is rejected or unsupported is listed in [`Model::diagnostics`].
     /// [`Model::compile`] does the same from bytes, and can be cancelled.
     pub fn from_text(text: &str, opts: &Options) -> Model {
         let t = Instant::now();
-        let translated = llevant_openmc::maybe_translate_bytes(text.as_bytes());
+        let translated = translate_input_bytes(text.as_bytes());
         let parsed = match &translated {
             Ok(std::borrow::Cow::Owned(bytes)) => {
                 migjorn::Model::parse(&String::from_utf8_lossy(bytes))

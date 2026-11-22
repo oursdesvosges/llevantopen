@@ -97,28 +97,31 @@ Planned, not built yet:
 ## Crates
 
 ```
-                    llevant-openmc (OpenMC XML -> MCNP translation)
-                       │       │
-                       ▼       ▼
-                    llevant  (engine: geometry only)
-                    ▲      ▲
-                    │   llevant-scene  (rules, hiding, looks, field data, input cards, cache)
-                    │      ▲  ◄── aci-tallies-geom, aci-tallies (crates.io)
-                    │   llevant-render  (colours, scales, field looks, shading, labels, PNG)
-                    │      ▲      ▲
-                    │      │   llevant-gpu  (first hits on the GPU)
-                    │      │      ▲
-        ┌───────────┴──────┴──────┴─────────┐
-        │                                   │
-   llevant-cli ◄── llevant-viewer      llevant-py
-   (`llevant`)     (app, widgets)      (Python; `python -m llevant` runs the CLI)
+     llevant-openmc (OpenMC XML)   llevant-tripoli (TRIPOLI-4)   llevant-dragon (DRAGON5)
+                       │                     │                           │
+                       └─────────────────────┼───────────────────────────┘
+                                             ▼
+                                          llevant  (engine: geometry only)
+                                          ▲      ▲
+                                          │   llevant-scene  (rules, hiding, looks, mass, field data, input cards, cache)
+                                          │      ▲  ◄── aci-tallies-geom, aci-tallies (crates.io)
+                                          │   llevant-render  (colours, scales, field looks, shading, labels, PNG)
+                                          │      ▲      ▲
+                                          │      │   llevant-gpu  (first hits on the GPU)
+                                          │      │      ▲
+                              ┌───────────┴──────┴──────┴─────────┐
+                              │                                   │
+                         llevant-cli ◄── llevant-viewer      llevant-py
+                         (`llevant`)     (app, widgets)      (Python; `python -m llevant` runs the CLI)
 ```
 
 | Crate | Owns | Default member |
 |---|---|---|
 | `crates/llevant` | The engine: compile, classify, trace, first hits, slices and cameras, fingerprints, instances, universes on their own, volumes, `save`/`read`, `export` (the GPU's format) | yes |
-| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`) to canonical MCNP input | yes |
-| `crates/llevant-scene` | What frontends build from a model: cell rules (`query`, `index`), what 3D views hide (`hiding`), material looks (`Looks`), field data and tally reading (`field`), the input's cards (`source`), the disk cache (`store`) | yes |
+| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`, `<plots>` parser) to canonical MCNP input | yes |
+| `crates/llevant-tripoli` | Pure-Rust TRIPOLI-4 deck translator (`SURF`, `TYPE`, `VOLU EQUA`/`COMBI`, `ECRASE`, `COMPOSITION`, `GEOMCOMP`) | yes |
+| `crates/llevant-dragon` | Pure-Rust DRAGON5 CLE-2000 `GEO:` translator (`CARCEL`, `TUBE`, `HEXCEL`, `CAR2D`, `CAR3D`, `MIX` validation) | yes |
+| `crates/llevant-scene` | What frontends build from a model: cell rules (`query`, `index`), what 3D views hide (`hiding`), material looks and masses (`materials`), field data and tally reading (`field`), the input's cards (`source`), the disk cache (`store`) | yes |
 | `crates/llevant-render` | Pixels: colours (`Paint`), colour scales, how fields are drawn, direct physically based shading, labels, ghost shells, PNG | yes |
 | `crates/llevant-cli` | The `llevant` command (`run_cli`, also behind `python -m llevant`; one JSON vocabulary in `json.rs`); features `gpu` and `viewer` | yes |
 | `crates/llevant-gpu` | The GPU renderer (wgpu compute): first hits of camera rays | no (slow to build, needs a GPU) |

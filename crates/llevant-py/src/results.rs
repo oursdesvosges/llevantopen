@@ -6,11 +6,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use llevant::{Change, Fill, Status, Subject, SurfaceId as RsSurfaceId};
+use llevant_scene::materials::{group_mass, Looks};
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::convert::{bbox, status_code, xyz, Xyz};
+use crate::convert::{bbox, err, status_code, xyz, Xyz};
 
 /// One level of a path: cell number and lattice element.
 type Step = (i64, Option<[i32; 3]>);
@@ -416,7 +417,7 @@ impl Cells {
     }
 }
 
-/// Volume of a cell, material, universe or label (cm³).
+/// Volume (and optional mass) of a cell, material, universe or label.
 #[pyclass(frozen, get_all, module = "llevant")]
 pub struct Group {
     /// The cell, material or universe number; None for a single label
@@ -427,10 +428,14 @@ pub struct Group {
     pub status: &'static str,
     /// The label, for a group that is one label (no number); else None.
     pub label: Option<Py<Label>>,
-    /// Mean of the probes' estimates.
+    /// Mean of the probes' estimates (cm³).
     pub volume: f64,
-    /// Standard error of `volume`, over the independent probes.
+    /// Standard error of `volume`, over the independent probes (cm³).
     pub sigma: f64,
+    /// Estimated mass (g) when density and atomic mass are known, else None.
+    pub mass: Option<f64>,
+    /// Standard error of `mass` (g), else None.
+    pub mass_sigma: Option<f64>,
     /// Estimate of each probe (0 for those that missed it).
     pub by_probe: Vec<f64>,
     /// Segments found; sigma is unreliable from a few.
@@ -460,6 +465,7 @@ impl Group {
         label: Option<&llevant::Label>,
         v: &llevant::Volume,
         h: f64,
+        mass: Option<(f64, f64)>,
     ) -> PyResult<Group> {
         Ok(Group {
             number,
@@ -468,6 +474,8 @@ impl Group {
             label: label.map(|l| Py::new(py, Label::new(m, l))).transpose()?,
             volume: v.estimate,
             sigma: v.sigma,
+            mass: mass.map(|x| x.0),
+            mass_sigma: mass.map(|x| x.1),
             by_probe: v.by_probe.clone(),
             segments: v.segments,
             probes_hit: v.probes_hit(),
@@ -479,7 +487,13 @@ impl Group {
     }
 
     /// A group of the engine's.
-    pub fn of(py: Python<'_>, m: &llevant::Model, g: &llevant::Group, h: f64) -> PyResult<Group> {
+    pub fn of(
+        py: Python<'_>,
+        m: &llevant::Model,
+        g: &llevant::Group,
+        h: f64,
+        mass: Option<(f64, f64)>,
+    ) -> PyResult<Group> {
         Group::new(
             py,
             m,
@@ -489,6 +503,7 @@ impl Group {
             g.label.as_ref(),
             &g.volume,
             h,
+            mass,
         )
     }
 
@@ -509,6 +524,7 @@ impl Group {
             Some(l),
             &v.volumes[i],
             v.grid.h,
+            None,
         )
     }
 }
@@ -538,10 +554,16 @@ impl Volumes {
     #[pyo3(signature = (by = "cell"))]
     fn by(&self, py: Python<'_>, by: &str) -> PyResult<Vec<Group>> {
         let g = crate::convert::group(by)?;
-        self.v
-            .grouped(&self.model, g)
+        let looks = Looks::new(&self.model, &[]).map_err(err)?;
+        let groups = self.v.grouped(&self.model, g);
+        let cell_groups = matches!(g, llevant::GroupBy::Material | llevant::GroupBy::Universe)
+            .then(|| self.v.grouped(&self.model, llevant::GroupBy::Cell));
+        groups
             .iter()
-            .map(|g| Group::of(py, &self.model, g, self.v.grid.h))
+            .map(|grp| {
+                let mass = group_mass(&self.model, &looks, g, grp, cell_groups.as_deref());
+                Group::of(py, &self.model, grp, self.v.grid.h, mass)
+            })
             .collect()
     }
 

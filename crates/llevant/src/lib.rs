@@ -84,7 +84,8 @@ pub use hit::{Ghost, Hits, Veils, Visibility, NO_CELL, NO_HIT};
 pub use instance::{ElementRange, Instances, NO_BIN};
 pub use lattice::{Element, Lattice, Target};
 pub use model::{
-    Cell, Diagnostic, Fill, GridMode, Model, Options, Scope, Stats, Subject, SurfaceId, Unit,
+    read_input_bytes, translate_input_bytes, Cell, Diagnostic, Fill, GridMode, Model, Options,
+    Scope, Stats, Subject, SurfaceId, Unit,
 };
 pub use progress::Progress;
 pub use recompile::Changed;

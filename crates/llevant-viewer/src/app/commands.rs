@@ -85,7 +85,8 @@ impl ViewerApp {
                     if !self.may_drop_edits("Open") {
                         continue;
                     }
-                    let mut d = rfd::FileDialog::new().set_title("Open an MCNP or OpenMC input");
+                    let mut d = rfd::FileDialog::new()
+                        .set_title("Open an MCNP, OpenMC, TRIPOLI-4, or DRAGON5 input");
                     if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty()) {
                         d = d.set_directory(dir);
                     }

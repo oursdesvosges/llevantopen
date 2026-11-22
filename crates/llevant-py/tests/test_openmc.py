@@ -507,3 +507,206 @@ def test_read_openmc_tally_cell_material_and_meshes(tmp_path: Path):
     # origin + (0, -1.5, +2.5): ir=1, iphi=1 (phi=270 deg), iz=1 -> 111
     assert f_cyl.value(1.0, 0.5, 5.5) == pytest.approx(111.0)
 
+
+def test_openmc_tallies_energy_particle_nuclide_instances_and_csv(tmp_path: Path):
+    """Test openmc_tallies, energy/particle/nuclide selection, cellinstance, distribcell, and CSV export."""
+    h5py = pytest.importorskip("h5py")
+
+    lattice_xml = """<?xml version='1.0' encoding='utf-8'?>
+<model>
+  <materials>
+    <material id="1" name="Fuel">
+      <density units="g/cm3" value="10.0"/>
+      <nuclide ao="1.0" name="U235"/>
+    </material>
+    <material id="2" name="Mod">
+      <density units="g/cm3" value="1.0"/>
+      <nuclide ao="2.0" name="H1"/>
+      <nuclide ao="1.0" name="O16"/>
+    </material>
+  </materials>
+  <geometry>
+    <surface id="1" type="z-cylinder" coeffs="0 0 0.4"/>
+    <surface id="2" type="x-plane" coeffs="-2.0" boundary="vacuum"/>
+    <surface id="3" type="x-plane" coeffs="2.0"  boundary="vacuum"/>
+    <surface id="4" type="y-plane" coeffs="-1.0" boundary="vacuum"/>
+    <surface id="5" type="y-plane" coeffs="1.0"  boundary="vacuum"/>
+    <surface id="6" type="z-plane" coeffs="-5.0" boundary="vacuum"/>
+    <surface id="7" type="z-plane" coeffs="5.0"  boundary="vacuum"/>
+    <cell id="10" material="1" region="-1" universe="1" name="Pin"/>
+    <cell id="11" material="2" region="1" universe="1" name="Mod"/>
+    <lattice id="20">
+      <dimension>2 1 1</dimension>
+      <lower_left>-2.0 -1.0</lower_left>
+      <pitch>2.0 2.0</pitch>
+      <universes>
+        1 1
+      </universes>
+    </lattice>
+    <cell id="1" fill="20" region="2 -3 4 -5 6 -7" name="Core"/>
+  </geometry>
+</model>
+"""
+    model = llevant.from_text(lattice_xml)
+    pin_insts = model.cell_instances(10)
+    assert len(pin_insts) == 2
+    inst_left = model.locate(-1.0, 0.0, 0.0).instance
+    inst_right = model.locate(1.0, 0.0, 0.0).instance
+    assert {inst_left, inst_right} == set(pin_insts)
+
+    sp_path = tmp_path / "sp_filters.h5"
+    with h5py.File(sp_path, "w") as h5:
+        tgrp = h5.create_group("tallies")
+        tgrp.attrs["ids"] = np.array([1, 2, 3], dtype=np.int32)
+        fgrp = tgrp.create_group("filters")
+
+        # Filter 1: cell
+        f1 = fgrp.create_group("filter 1")
+        f1.create_dataset("type", data=b"cell")
+        f1.create_dataset("bins", data=np.array([10, 11], dtype=np.int32))
+        # Filter 2: energy (2 bins: [0..1], [1..2e7] eV)
+        f2 = fgrp.create_group("filter 2")
+        f2.create_dataset("type", data=b"energy")
+        f2.create_dataset("bins", data=np.array([0.0, 1.0, 2.0e7], dtype=np.float64))
+        # Filter 3: particle
+        f3 = fgrp.create_group("filter 3")
+        f3.create_dataset("type", data=b"particle")
+        f3.create_dataset("bins", data=np.array([b"neutron", b"photon"]))
+        # Filter 4: cellinstance [(10, 0), (10, 1)]
+        f4 = fgrp.create_group("filter 4")
+        f4.create_dataset("type", data=b"cellinstance")
+        f4.create_dataset("bins", data=np.array([[10, 0], [10, 1]], dtype=np.int32))
+        # Filter 5: distribcell [10]
+        f5 = fgrp.create_group("filter 5")
+        f5.create_dataset("type", data=b"distribcell")
+        f5.create_dataset("bins", data=np.array([10], dtype=np.int32))
+        f5.create_dataset("n_bins", data=2)
+
+        # Tally 1: shapes (cell=2, energy=2, particle=2, nuc=2, score=2)
+        t1 = tgrp.create_group("tally 1")
+        t1.create_dataset("name", data=b"pin_spectrum")
+        t1.create_dataset("n_realizations", data=2)
+        t1.create_dataset("filters", data=np.array([1, 2, 3], dtype=np.int32))
+        t1.create_dataset("nuclides", data=np.array([b"U235", b"U238"]))
+        t1.create_dataset("score_bins", data=np.array([b"flux", b"fission"]))
+        arr = np.zeros((2, 2, 2, 2, 2, 3), dtype=np.float64)
+        for ic in range(2):
+            for ie in range(2):
+                for ip in range(2):
+                    for inuc in range(2):
+                        for isc in range(2):
+                            mean = 100.0 * (ic + 1) + 10.0 * ie + 5.0 * ip + 2.0 * inuc + isc + 1.0
+                            # 2 realizations with identical half values -> sum = 2*mean, sum_sq = 2*mean^2 -> rel_err=0
+                            arr[ic, ie, ip, inuc, isc, :2] = [2.0 * mean, 2.0 * mean * mean]
+        t1.create_dataset("results", data=arr.reshape((8, 4, 3)))
+
+        # Tally 2: cellinstance
+        t2 = tgrp.create_group("tally 2")
+        t2.create_dataset("name", data=b"pin_inst_ci")
+        t2.create_dataset("n_realizations", data=1)
+        t2.create_dataset("filters", data=np.array([4], dtype=np.int32))
+        t2.create_dataset("score_bins", data=np.array([b"heating"]))
+        t2.create_dataset("results", data=np.array([[[11.0, 121.0, 0.0]], [[22.0, 484.0, 0.0]]]))
+
+        # Tally 3: distribcell
+        t3 = tgrp.create_group("tally 3")
+        t3.create_dataset("name", data=b"pin_inst_dc")
+        t3.create_dataset("n_realizations", data=1)
+        t3.create_dataset("filters", data=np.array([5], dtype=np.int32))
+        t3.create_dataset("score_bins", data=np.array([b"fission"]))
+        t3.create_dataset("results", data=np.array([[[33.0, 1089.0, 0.0]], [[44.0, 1936.0, 0.0]]]))
+
+    metas = llevant.openmc_tallies(sp_path)
+    assert [m["id"] for m in metas] == [1, 2, 3]
+    assert metas[0]["scores"] == ["flux", "fission"]
+    assert metas[0]["nuclides"] == ["U235", "U238"]
+    assert metas[0]["filters"][1]["bins"] == [(0.0, 1.0), (1.0, 2.0e7)]
+
+    # Select energy=14.1 MeV (bin 1), particle="photon" (bin 1), nuclide="U238" (bin 1), score="fission" (bin 1)
+    f_sel = llevant.read_openmc_tally(
+        model,
+        sp_path,
+        tally=1,
+        score="fission",
+        nuclide="U238",
+        energy=1.41e7,
+        particle="photon",
+    )
+    # ic=0 (cell 10): 100 + 10*1 + 5*1 + 2*1 + 1 + 1 = 119.0
+    assert f_sel.value(-1.0, 0.0, 0.0) == pytest.approx(119.0)
+    # ic=1 (cell 11): 200 + 10*1 + 5*1 + 2*1 + 1 + 1 = 219.0
+    assert f_sel.value(-1.8, 0.0, 0.0) == pytest.approx(219.0)
+
+    # Energy bin 0 vs total collapse
+    f_tot = llevant.read_openmc_tally(
+        model, sp_path, tally=1, score="flux", nuclide=0, particle="neutron", energy="total"
+    )
+    f_e0 = llevant.read_openmc_tally(
+        model, sp_path, tally=1, score="flux", nuclide=0, particle="neutron", energy=0
+    )
+    f_e1 = llevant.read_openmc_tally(
+        model, sp_path, tally=1, score="flux", nuclide=0, particle="neutron", energy=1
+    )
+    assert f_tot.value(-1.0, 0.0, 0.0) == pytest.approx(
+        f_e0.value(-1.0, 0.0, 0.0) + f_e1.value(-1.0, 0.0, 0.0)
+    )
+
+    f_ci = llevant.read_openmc_tally(model, sp_path, tally=2)
+    assert f_ci.kind == "instances"
+    vals_ci = sorted([f_ci.value(-1.0, 0.0, 0.0), f_ci.value(1.0, 0.0, 0.0)])
+    assert vals_ci == pytest.approx([11.0, 22.0])
+
+    f_dc = llevant.read_openmc_tally(model, sp_path, tally=3)
+    assert f_dc.kind == "instances"
+    vals_dc = sorted([f_dc.value(-1.0, 0.0, 0.0), f_dc.value(1.0, 0.0, 0.0)])
+    assert vals_dc == pytest.approx([33.0, 44.0])
+
+    csv_out = llevant.export_openmc_tally_csv(model, sp_path, tmp_path / "inst.csv", tally=2)
+    csv_text = csv_out.read_text(encoding="utf-8")
+    assert csv_text.startswith("instance,instance_path,value,rel_error")
+    assert "11.0" in csv_text and "22.0" in csv_text
+
+
+def test_from_openmc_objects_and_group_masses(tmp_path: Path):
+    """from_openmc supports duck-typed OpenMC objects, preserves labels, and Group exposes mass."""
+    xml = """<?xml version='1.0' encoding='utf-8'?>
+<model>
+  <materials>
+    <material id="1" name="Tungsten">
+      <density units="g/cm3" value="19.25"/>
+      <nuclide ao="1.0" name="W184"/>
+    </material>
+  </materials>
+  <geometry>
+    <surface id="1" type="sphere" coeffs="0 0 0 2.0"/>
+    <surface id="2" type="sphere" coeffs="0 0 0 5.0" boundary="vacuum"/>
+    <cell id="5" material="1" region="-1" name="Tungsten Sphere"/>
+    <cell id="6" material="void" region="1 -2" name="Cavity"/>
+  </geometry>
+</model>
+"""
+
+    class _MockOpenMcModel:
+        def export_to_model_xml(self, path: str = "model.xml") -> None:
+            Path(path).write_text(xml, encoding="utf-8")
+
+    m = llevant.from_openmc(_MockOpenMcModel())
+    # Temp directory has been cleaned up, yet label queries still resolve via compiled text.
+    lo, hi = m.bbox('label "Tungsten"')
+    assert lo[0] < -1.9 and hi[0] > 1.9
+
+    vols = m.volumes(0.4)
+    by_mat = {g.number: g for g in vols.by("material")}
+    expected_mass = (4.0 / 3.0) * math.pi * (2.0**3) * 19.25
+    assert by_mat[1].mass is not None
+    assert abs(by_mat[1].mass - expected_mass) < max(4.0 * (by_mat[1].mass_sigma or 0.0), 30.0)
+    assert by_mat[0].mass is None
+
+    pd = pytest.importorskip("pandas")
+    df_pd = vols.to_pandas("material")
+    assert "mass_g" in df_pd.columns and "mass_sigma_g" in df_pd.columns
+    import importlib.util
+    if importlib.util.find_spec("polars") is not None:
+        df_pl = vols.to_polars("material")
+        assert "mass_g" in df_pl.columns and "mass_sigma_g" in df_pl.columns
+

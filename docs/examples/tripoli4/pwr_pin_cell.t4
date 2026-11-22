@@ -1,0 +1,50 @@
+// Example TRIPOLI-4 PWR pin cell with ECRASE priority, COMPOSITION, GEOMCOMP, and BOUNDARY_CONDITION.
+LANG ENGLISH
+
+GEOMETRY
+
+TITLE PWR pin cell with UO2 fuel, Zircaloy cladding, and light water moderator
+
+SURF 1 CYLZ 0.0 0.0 0.41     // Fuel outer radius
+SURF 2 CYLZ 0.0 0.0 0.475    // Cladding outer radius
+SURF 3 PLANEX -0.63          // Cell -X boundary
+SURF 4 PLANEX  0.63          // Cell +X boundary
+SURF 5 PLANEY -0.63          // Cell -Y boundary
+SURF 6 PLANEY  0.63          // Cell +Y boundary
+SURF 7 PLANEZ -10.0          // Cell -Z boundary
+SURF 8 PLANEZ  10.0          // Cell +Z boundary
+
+VOLU 1 EQUA PLUS 3 3 5 7 MINUS 3 4 6 8 ENDV // Water Moderator
+VOLU 2 EQUA PLUS 1 7 MINUS 2 2 8 ECRASE 1 1 ENDV // Zircaloy Cladding
+VOLU 3 EQUA PLUS 1 7 MINUS 2 1 8 ECRASE 1 2 ENDV // UO2 Fuel Pellet
+
+ENDG
+
+BOUNDARY_CONDITION
+4
+ALL_COMPLETE REFLECTION 3
+ALL_COMPLETE REFLECTION 4
+ALL_COMPLETE REFLECTION 5
+ALL_COMPLETE REFLECTION 6
+END_BOUNDARY_CONDITION
+
+COMPOSITION
+3
+DENSITY 600 m1_uo2 10.4 NB_ATOM 2
+  U235 0.04
+  U238 0.96
+DENSITY 600 m2_zirc4 6.55 NB_ATOM 2
+  ZR90 0.985
+  SN120 0.015
+DENSITY 580 m3_water 0.74 NB_ATOM 2
+  H1 2.0
+  O16 1.0
+END_COMPOSITION
+
+GEOMCOMP
+  m1_uo2   1 3
+  m2_zirc4 1 2
+  m3_water 1 1
+END_GEOMCOMP
+
+END

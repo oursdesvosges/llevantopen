@@ -1280,3 +1280,50 @@ fn openmc_model_opens_and_searches_labels() {
         !d.view3d.busy() && d.slice.progress() >= 1.0
     });
 }
+
+/// A native TRIPOLI-4 input file opens directly in the viewer, resolves
+/// volume comments as labels, and settles both 3D and slice views.
+#[test]
+fn tripoli4_model_opens_and_renders() {
+    let _one = serial();
+    if !adapter_available() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
+    let t4_path = PathBuf::from(format!(
+        "{}/../../docs/examples/tripoli4/pwr_pin_cell.t4",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 700.0))
+        .wgpu_setup(llevant_viewer::app::wgpu_options().wgpu_setup)
+        .build_eframe(|cc| ViewerApp::new(cc, t4_path.clone(), ViewState::new(), None).unwrap());
+    step_until(&mut h, "the TRIPOLI-4 model to load", |a| {
+        a.document().is_some() || a.error().is_some()
+    });
+    assert!(h.state().error().is_none(), "{:?}", h.state().error());
+    let doc = h.state().document().unwrap();
+    assert!(
+        doc.model.diagnostics().is_empty(),
+        "{:?}",
+        doc.model.diagnostics()
+    );
+
+    h.state_mut()
+        .document_mut()
+        .unwrap()
+        .execute(Command::Select(
+            "label \"UO2 Fuel Pellet\"".parse().unwrap(),
+            SelectMode::Replace,
+        ));
+    settle(&mut h);
+    let doc = h.state().document().unwrap();
+    let pellet = doc.model.cell_index(3).expect("UO2 fuel cell 3");
+    assert_eq!(doc.selection.cells.count(), 1);
+    assert!(doc.selection.cells.contains(pellet));
+
+    step_until(&mut h, "3D and slice views to settle", |a| {
+        let d = a.document().unwrap();
+        !d.view3d.busy() && d.slice.progress() >= 1.0
+    });
+}

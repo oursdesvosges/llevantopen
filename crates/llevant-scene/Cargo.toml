@@ -17,7 +17,6 @@ aci-tallies = { workspace = true, optional = true }
 aci-tallies-geom.workspace = true
 blake3.workspace = true
 llevant.workspace = true
-llevant-openmc.workspace = true
 log.workspace = true
 memchr.workspace = true
 memmap2.workspace = true

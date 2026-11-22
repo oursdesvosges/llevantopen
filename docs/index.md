@@ -6,23 +6,26 @@ hide:
 
 # llevant
 
-**See and check MCNP and OpenMC geometry, fast.** llevant reads an MCNP input file
-or OpenMC XML model (`model.xml`, `geometry.xml` + `materials.xml`) and tells you
-what is where in it. It works on any model, from a test problem to a 425 000-cell
-fusion reactor:
+**See and check MCNP, OpenMC, TRIPOLI-4, and DRAGON5 geometry, fast.** llevant
+reads MCNP input files, OpenMC XML models (`model.xml`, `geometry.xml` +
+`materials.xml`), TRIPOLI-4 decks (`.t4`/`.tripoli`), and DRAGON5 `GEO:`
+procedures (`.x2m`/`.c2m`) and tells you what is where in them. It works on any
+model, from a test problem to a 425 000-cell fusion reactor:
 
-- **look at it**: 3D views and exact slices, in an interactive viewer or as images;
-- **find mistakes**: gaps and overlaps (where particles are lost), with their size
-  and location;
+- **look at it**: 3D views, OpenMC `<plots>`, and exact slices, in an interactive viewer or as images;
+- **find mistakes**: gaps and overlaps (where particles are lost), with their size, location, and automated QA slice reports;
+- **diagnose lost particles**: inspect `(x, y, z)` coordinates or MCNP/OpenMC logs to pinpoint gaps, overlaps, and grazing surfaces;
 - **measure**: the volume and mass of every cell, material or universe, with an
   honest uncertainty;
 - **ask questions**: which cell holds this point, which cells this line crosses;
 - **compare**: which cells changed between two versions of a model;
-- **show results**: meshtal, MCTAL, OpenMC statepoint tallies, and per-cell results drawn over the geometry.
+- **show results**: OpenMC statepoint tallies (with energy/particle/nuclide/instance filtering), meshtal, MCTAL, D1SUNED cuvmsh, and per-cell results drawn over the geometry;
+- **convert**: translate OpenMC, TRIPOLI-4, and DRAGON5 geometry to canonical MCNP input.
 
 It reads every MCNP surface type and macrobody, OpenMC CSG XML models (surfaces,
-universes, rectilinear and hexagonal lattices, rotations and materials), and
-transforms ([the full list](reference/supported-input.md)).
+universes, rectilinear and hexagonal lattices, rotations and materials),
+TRIPOLI-4 volumes (`EQUA`, `COMBI`, `ECRASE`), DRAGON5 `GEO:` cells (`CARCEL`,
+`TUBE`, `HEXCEL`, `CAR2D`, `CAR3D`), and transforms ([the full list](reference/supported-input.md)).
 
 ![The llevant viewer: a 3D view and a slice side by side](img/viewer.png)
 
