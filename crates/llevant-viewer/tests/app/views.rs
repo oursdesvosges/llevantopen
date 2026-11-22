@@ -934,7 +934,11 @@ fn volumes_problems_and_alike() {
     // Statistics: universes alike.
     shortcut(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
     panel(&mut h, Panel::Statistics);
-    h.run_steps(2);
+    step_until_label(
+        &mut h,
+        "statistics to finish counting",
+        "Find universes alike",
+    );
     let find = h.get_by_label("Find universes alike");
     find.scroll_to_me();
     h.run_steps(30);

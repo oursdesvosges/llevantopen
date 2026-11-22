@@ -58,6 +58,19 @@ fn step_until(h: &mut Harness<'_, ViewerApp>, what: &str, done: impl Fn(&ViewerA
     }
 }
 
+/// Step until a node with `label` appears, or fail after a while.
+fn step_until_label(h: &mut Harness<'_, ViewerApp>, what: &str, label: &str) {
+    let start = Instant::now();
+    while h.query_by_label(label).is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "timed out waiting for {what}"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Frames until the views have caught up with the scene (edits are
 /// derived off the UI thread).
 /// The newest message of `doc` but news of its search structures (built
