@@ -1,33 +1,35 @@
 <p align="center">
-  <img src="docs/img/logo.png" alt="" width="110">
+  <img src="docs/img/logo.png" alt="llevant logo" width="110">
 </p>
 
-<h1 align="center">llevant</h1>
+<h1 align="center">llevantopen</h1>
 
 <p align="center">
-  <a href="https://github.com/Fusion4Energy/llevant/actions/workflows/ci.yml"><img src="https://github.com/Fusion4Energy/llevant/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://pypi.org/project/llevant/"><img src="https://img.shields.io/pypi/v/llevant" alt="PyPI"></a>
-  <a href="https://crates.io/crates/llevant"><img src="https://img.shields.io/crates/v/llevant" alt="crates.io"></a>
-  <a href="https://fusion4energy.github.io/llevant/"><img src="https://img.shields.io/badge/docs-fusion4energy.github.io%2Fllevant-blue" alt="Documentation"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-EUPL--1.2-blue" alt="License: EUPL-1.2"></a>
+  <strong>Fast, exact geometry queries, 3D viewer, QA, and tally visualization for OpenMC XML and MCNP models</strong>
 </p>
 
-Fast, exact geometry queries on MCNP and OpenMC XML models: an interactive viewer, a command line
-and a Python module, on a Rust engine. llevant answers:
+<p align="center">
+  <a href="https://github.com/oursdesvosges/llevantopen/actions/workflows/ci.yml"><img src="https://github.com/oursdesvosges/llevantopen/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/oursdesvosges/llevantopen/actions/workflows/openmc-integration.yml"><img src="https://github.com/oursdesvosges/llevantopen/actions/workflows/openmc-integration.yml/badge.svg?branch=main" alt="OpenMC Integration"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-EUPL--1.2-blue" alt="License: EUPL-1.2"></a>
+  <a href="https://github.com/Fusion4Energy/llevant"><img src="https://img.shields.io/badge/upstream-Fusion4Energy%2Fllevant-lightgrey" alt="Upstream: Fusion4Energy/llevant"></a>
+</p>
 
-- where points are, and what lines cross;
-- slices and 3D views;
-- volumes, and the gaps and overlaps of a model;
-- fingerprints that tell two versions of a model apart;
-- tally results (meshtal, MCTAL, OpenMC HDF5 statepoint, per cell) drawn over the geometry.
+**llevantopen** extends [llevant](https://github.com/Fusion4Energy/llevant) with native pure-Rust **OpenMC XML** support (`llevant-openmc`, zero OpenMC runtime needed for geometry) and **OpenMC HDF5 statepoint tally loading** (`llevant.read_openmc_tally`), alongside full MCNP support (through [migjorn](https://crates.io/crates/migjorn)). From the interactive 3D viewer, the command line, Python, or Rust, it answers:
 
-It reads MCNP input (through [migjorn](https://crates.io/crates/migjorn)) and OpenMC XML
-(`model.xml`, or a directory containing `geometry.xml` and `materials.xml`), with
-surfaces and macrobodies, universes at any depth, rectilinear and hexagonal lattices,
-and transforms.
+- **OpenMC XML & MCNP geometry**: load `model.xml`, `geometry.xml` (with auto-discovered sibling `materials.xml`), directories, in-memory XML via `from_text`, and MCNP inputs;
+- **exact point & ray queries**: where points lie (`locate` / `classify`) and every segment a line crosses (`trace`) through nested universes, transforms, and rectilinear/hexagonal lattices;
+- **2D slices & GPU 3D views**: interactive `llevant-viewer` and batch CPU/GPU renders with hiding, isolation, cutaways, and ghost shells;
+- **QA & stochastic volumes**: gaps and overlaps (`check`) plus cell, material, and universe volumes with honest uncertainties;
+- **fingerprints & diffs**: tell two revisions of a model apart cell by cell (`fingerprint --diff`);
+- **OpenMC cell `name="..."` label queries**: select, isolate, hide, or bound cells by name (`label "Tungsten"`);
+- **tally & field overlays**: OpenMC HDF5 statepoints (`read_openmc_tally`), MCNP `meshtal`, `MCTAL`, D1SUNED `cuvmsh`, and CSV drawn over the geometry.
 
-**Documentation: <https://fusion4energy.github.io/llevant/>**: install, a ten-minute
-tour, how-to guides and references.
+| OpenMC fusion HTS blanket (3D cutaway) | OpenMC VVER hexagonal lattice (slice at `z=0`) |
+|---|---|
+| ![OpenMC fusion HTS blanket 3D cutaway](docs/img/openmc-fusion-blanket.png) | ![OpenMC VVER hexagonal assembly slice](docs/img/openmc-vver-hex.png) |
+
+Ready-to-run OpenMC models live in [`docs/examples/openmc`](docs/examples/openmc), alongside MCNP models in [`docs/examples`](docs/examples).
 
 ![The viewer: a reactor core cut open in 3D](docs/img/viewer.png)
 
@@ -35,51 +37,100 @@ tour, how-to guides and references.
 |---|---|
 | ![Pin powers drawn over the core in 3D and in a slice](docs/img/viewer-results.png) | ![The Check workspace listing two overlaps, hatched in the slice](docs/img/viewer-check.png) |
 
-The models are in [`docs/examples`](docs/examples).
+## OpenMC support
+
+`llevant-openmc` translates OpenMC XML models natively in pure Rust (no OpenMC runtime required to inspect, check, slice, render, or view geometry):
+
+| Capability | Supported features |
+|---|---|
+| **Inputs** | `model.xml`, `geometry.xml` (auto-discovers sibling `materials.xml`), a directory containing either, and in-memory XML via `Model::from_text` / `llevant.from_text` |
+| **Surfaces** | `x-plane`, `y-plane`, `z-plane`, `plane`, `sphere`, `x-cylinder`, `y-cylinder`, `z-cylinder`, `x-cone`, `y-cone`, `z-cone`, `x-torus`, `y-torus`, `z-torus`, and `quadric` |
+| **Boundaries** | `vacuum`, `reflective`, `white`, and `periodic` outer boundary conditions |
+| **Repeated structures** | Boolean CSG regions (`&`, `\|`, `~`, parentheses), nested `universe`/`fill`, `translation`, 3-angle Euler & 9-entry `rotation`, 2D/3D `<lattice>` and `<hex_lattice>` (`orientation="y"` & `"x"`, `<outer>`) |
+| **Materials & labels** | Nuclide `ao`/`wo` and elemental compositions (`g/cm3`, `kg/m3`, `atom/b-cm`, `atom/cm3`, `sum`), plus cell `name="..."` attributes exposed to `label "..."` queries |
+| **HDF5 tallies (Python)** | `llevant.read_openmc_tally` loads `cell`, `material`, and `mesh` (`RegularMesh`, `RectilinearMesh`, `CylindricalMesh`) filters, scores by name or index, and `error=True` relative errors (`pip install h5py`) |
+
+Full MCNP & OpenMC compatibility details: [`docs/reference/supported-input.md`](docs/reference/supported-input.md).
 
 ## Install
 
-```sh
-pip install llevant          # Python 3.9+: the module, the `llevant` command and the viewer
-```
+Install the OpenMC-enabled fork from GitHub:
 
-Windows and Linux (x86-64). The [releases](https://github.com/Fusion4Energy/llevant/releases)
-also have the `llevant` and `llevant-viewer` programs to download, and
-`cargo install llevant-cli --features gpu,viewer` builds them from source. Details,
-and what your computer needs: [Install](https://fusion4energy.github.io/llevant/install/).
-
-## Try it
-
-[`docs/examples/cask.i`](docs/examples/cask.i) is a small model to try (a cask of fuel
-pins on a concrete floor); [Getting started](https://fusion4energy.github.io/llevant/getting-started/)
-walks through it.
+**Rust CLI & interactive viewer:**
 
 ```sh
-llevant info   cask.i                          # sizes, extent, diagnostics
-llevant locate cask.i 0 0 100  80 0 100        # cell path, material, density of each point
-llevant slice  cask.i --plane z=100 --colour material -o slice.png
-llevant render cask.i --hide 5 --clip 0,0,0,0,-1,0 --colour realistic -o view.png
-llevant check  cask.i --h 2                    # exit status 1 if gaps or overlaps
-llevant view   cask.i                          # the viewer (or: llevant-viewer cask.i)
+cargo install --git https://github.com/oursdesvosges/llevantopen llevant-cli --features gpu,viewer
 ```
 
-With pip, `llevant` is `python -m llevant`. From Python:
+**Python module (with CLI and viewer included):**
+
+```sh
+git clone https://github.com/oursdesvosges/llevantopen.git
+cd llevantopen/crates/llevant-py
+pip install .            # builds the Rust extension (or: maturin develop --release)
+pip install h5py         # optional: needed only for llevant.read_openmc_tally
+```
+
+**Prebuilt binaries & Python wheels:** download or trigger builds for Linux and Windows (`x86_64`) from the fork's [Release workflow](https://github.com/oursdesvosges/llevantopen/actions/workflows/release.yml).
+
+> **Note:** Upstream PyPI (`pip install llevant`) and `Fusion4Energy/llevant` releases track upstream MCNP-only `llevant` and do not include `llevant-openmc` or `read_openmc_tally`.
+
+## Try it (OpenMC & MCNP)
+
+### OpenMC XML (CLI & Python)
+
+Try the included OpenMC examples (`fusion_hts_blanket.xml`, `vver_hex_assembly.xml`, `pwr_pin_lattice.xml`):
+
+```sh
+llevant info   docs/examples/openmc/fusion_hts_blanket.xml
+llevant locate docs/examples/openmc/fusion_hts_blanket.xml 0 62 0  0 95 0
+llevant render docs/examples/openmc/fusion_hts_blanket.xml --wedge 0,0,0,0,0,1,-110,10 --colour realistic -o blanket.png
+llevant slice  docs/examples/openmc/vver_hex_assembly.xml --plane z=0 --colour realistic -o vver.png
+llevant check  docs/examples/openmc/pwr_pin_lattice.xml --h 0.75
+llevant view   docs/examples/openmc/fusion_hts_blanket.xml
+```
+
+From Python (use `python -m llevant` for the CLI bundled in the wheel):
 
 ```python
 import llevant
 
-m = llevant.load("cask.i")             # compiled once, cached on disk
-m.locate(0, 0, 100)                    # <Label inside 4 > 30[0,0,0] > 41>
-m.classify(points)                     # (N, 3) numpy array -> numpy columns
-m.slice(z=100, colour="material")      # an image, shown inline in Jupyter
-m.volumes(h=2).by("material")          # volumes with their uncertainty
-m.check(h=2)                           # gaps and overlaps
+m = llevant.load("docs/examples/openmc/fusion_hts_blanket.xml")
+m.locate(0, 62, 0)                      # <Label inside 2>
+m.bbox('label "Tungsten"')              # searches OpenMC cell name="..."
+m.check(12.0)                           # gaps and overlaps
+
+# Overlay OpenMC HDF5 statepoint tallies on any slice or 3D render (requires h5py):
+f = llevant.read_openmc_tally(m, "statepoint.100.h5", score="flux")
+m.slice(z=0, field=f)
+```
+
+See [`docs/guide/python.md`](docs/guide/python.md) and [`docs/guide/cli.md`](docs/guide/cli.md) for the full API and CLI options.
+
+### MCNP
+
+[`docs/examples/cask.i`](docs/examples/cask.i) is a small MCNP cask model (fuel pins on a concrete floor):
+
+```sh
+llevant info   docs/examples/cask.i            # sizes, extent, diagnostics
+llevant locate docs/examples/cask.i 0 0 100  80 0 100
+llevant slice  docs/examples/cask.i --plane z=100 --colour material -o slice.png
+llevant render docs/examples/cask.i --hide 5 --clip 0,0,0,0,-1,0 --colour realistic -o view.png
+llevant check  docs/examples/cask.i --h 2      # exit status 1 if gaps or overlaps
+llevant view   docs/examples/cask.i            # the viewer (or: llevant-viewer)
+```
+
+```python
+import llevant
+
+m = llevant.load("docs/examples/cask.i")  # compiled once, cached on disk
+m.classify(points)                        # (N, 3) numpy array -> numpy columns
+m.volumes(h=2).by("material")             # volumes with their uncertainty
 ```
 
 ## How fast
 
-On a 425 k-cell fusion reactor model, on a 16-thread laptop
-([`docs/benchmarks.md`](docs/benchmarks.md)):
+On a 425 k-cell fusion reactor model, on a 16-thread laptop ([`docs/benchmarks.md`](docs/benchmarks.md)):
 
 | | |
 |---|---|
@@ -89,7 +140,6 @@ On a 425 k-cell fusion reactor model, on a 16-thread laptop
 | Slices | 110 ms for 1000 rows |
 | Gaps and overlaps | the 36 × 37 × 35 m building checked on lines 5 cm apart in under 3 minutes |
 | Viewer | 60 fps while orbiting (GPU) |
-
 
 ## What it does
 
@@ -105,33 +155,11 @@ On a 425 k-cell fusion reactor model, on a 16-thread laptop
 | Fingerprints of cells and universes; model diffs | `fingerprint` | `Model::fingerprints` |
 | A universe (a filler) as a model of its own | `--universe` | `Model::universe` |
 | Cell instances: each place a cell occupies, numbered | `locate` | `Model::instances` |
-| Results over the geometry: values per cell, instance or mesh voxel (CSV, meshtal, MCTAL, D1SUNED cuvmsh, OpenMC HDF5 statepoint) | `slice`/`render --field` (`llevant.read_openmc_tally` in Python) | `llevant_scene::field` |
+| Results over the geometry: OpenMC HDF5 statepoint, meshtal, MCTAL, D1SUNED cuvmsh, CSV | `slice`/`render --field`, `llevant.read_openmc_tally` | `llevant_scene::field` |
 | An interactive viewer: 3D view and slice, picking, rules, cuts, fields, FMESH layout, card editing | `llevant-viewer`, `llevant view` | `crates/llevant-viewer` |
-| Python: models kept in memory, numpy batch queries, inline images, the viewer | `python -m llevant` | `crates/llevant-py` |
+| Python: OpenMC/MCNP models in memory, numpy batch queries, inline images, the viewer | `python -m llevant` | `crates/llevant-py` |
 
-What MCNP and OpenMC input is read, and what is not:
-[Supported input](https://fusion4energy.github.io/llevant/reference/supported-input/).
-
-## OpenMC XML
-
-OpenMC models load natively in the CLI, Python, and viewer (no OpenMC runtime needed
-for geometry), including [`docs/examples/openmc/fusion_hts_blanket.xml`](docs/examples/openmc/fusion_hts_blanket.xml)
-and [`docs/examples/openmc/vver_hex_assembly.xml`](docs/examples/openmc/vver_hex_assembly.xml):
-
-```sh
-llevant info   docs/examples/openmc/fusion_hts_blanket.xml
-llevant slice  docs/examples/openmc/vver_hex_assembly.xml --plane z=0 --colour realistic -o vver.png
-llevant check  docs/examples/openmc/pwr_pin_lattice.xml --h 0.75
-```
-
-```python
-import llevant
-
-m = llevant.load("docs/examples/openmc/fusion_hts_blanket.xml")
-m.bbox('label "Tungsten"')                      # searches OpenMC cell name="..."
-f = llevant.read_openmc_tally(m, "statepoint.100.h5", score="flux")
-m.slice(z=0, field=f)
-```
+What OpenMC XML and MCNP input is read, and what is not: [`docs/reference/supported-input.md`](docs/reference/supported-input.md).
 
 ## Library
 
@@ -139,8 +167,9 @@ m.slice(z=0, field=f)
 use llevant::{Depth, Line, Model, Options, Status, DEFAULT_PRECISION};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = Model::load("model.mcnp", &Options::default(), None)?;
-    let res = model.classify(&[[0.0, 0.0, 0.0], [120.0, -3.5, 40.0]], Depth::All);
+    // Loads OpenMC XML (`model.xml`, `geometry.xml` + `materials.xml`) or MCNP inputs identically.
+    let model = Model::load("docs/examples/openmc/fusion_hts_blanket.xml", &Options::default(), None)?;
+    let res = model.classify(&[[0.0, 0.0, 0.0], [0.0, 62.0, 0.0]], Depth::All);
     for &id in &res.ids {
         let label = &res.labels[id as usize];
         println!("{}", model.describe(label)); // e.g. "inside 12 > 304[1,-2,0] > 7"
@@ -150,29 +179,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let line = Line::between([-100.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
+    let line = Line::between([-250.0, 0.0, 0.0], [250.0, 0.0, 0.0]);
     let tr = model.trace(&[line], Depth::All)?;
     for k in tr.segments(0) {
-        let out = model.surface_id(tr.surface_out[k]); // MCNP surface (and facet), if any
+        let out = model.surface_id(tr.surface_out[k]);
         let label = &tr.labels[tr.ids[k] as usize];
         println!("{} .. {}: {} -> {out:?}", tr.t0[k], tr.t1[k], model.describe(label));
     }
 
-    let fp = model.fingerprints(DEFAULT_PRECISION)?; // fp.cells[i].geometry, fp.units[u].content
+    let fp = model.fingerprints(DEFAULT_PRECISION)?;
     println!("{} cells fingerprinted", fp.cells.len());
     Ok(())
 }
 ```
 
-- **Batches.** Queries take batches and return flat arrays, ready for numpy: one
-  label id per point or segment, with the labels interned.
-- **Indices and numbers.** Labels refer to cells by index into `model.cells()`;
-  `describe`, `cell_id` and `surface_id` give MCNP numbers.
+- **Batches.** Queries take batches and return flat arrays, ready for numpy: one label id per point or segment, with the labels interned.
+- **Indices and numbers.** Labels refer to cells by index into `model.cells()`; `describe`, `cell_id`, and `surface_id` give cell/surface numbers.
 - **Determinism.** Results are identical for any number of threads.
 - **Errors.** Bad arguments are an `Error`, never a panic.
 
-The API is on [docs.rs](https://docs.rs/llevant) (views, volumes and images included),
-and [`docs/contracts.md`](docs/contracts.md) lists what each query guarantees.
+[`docs/contracts.md`](docs/contracts.md) lists what each query guarantees, and upstream Rust API docs are on [docs.rs](https://docs.rs/llevant).
 
 ## Layout
 
@@ -180,26 +206,28 @@ and [`docs/contracts.md`](docs/contracts.md) lists what each query guarantees.
 |---|---|
 | `crates/llevant` | The engine (pure Rust, geometry only) |
 | `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`) |
-| `crates/llevant-scene` | What frontends build from a model: cell rules, hidden cells, material looks, field data and tally files, the input's cards, the cache of compiled models |
+| `crates/llevant-scene` | What frontends build from a model: cell rules, hidden cells, material looks, field data and tally files, input cards, disk cache |
 | `crates/llevant-render` | Images: colours, colour scales, field looks, physically based shading, labels, PNG |
-| `crates/llevant-gpu` | The GPU renderer (wgpu) |
-| `crates/llevant-viewer` | The `llevant-viewer` desktop app and its egui widgets |
+| `crates/llevant-gpu` | The GPU renderer (`wgpu`) |
+| `crates/llevant-viewer` | The `llevant-viewer` desktop app and its `egui` widgets |
 | `crates/llevant-cli` | The `llevant` command |
-| `crates/llevant-py` | The Python module `llevant` (PyO3, abi3 wheels) |
-| `tools/bench` | `llevant-bench`: benchmarks, checks against brute force and of the GPU against the CPU |
-| `tools/mcnp-oracle` | Checks llevant against MCNP itself |
+| `crates/llevant-py` | The Python module `llevant` (PyO3, abi3 wheels, OpenMC HDF5 tally reader) |
+| `tools/bench` | `llevant-bench`: benchmarks, brute-force checks, and GPU vs CPU comparisons |
+| `tools/mcnp-oracle` | Checks `llevant` against MCNP itself |
 | `tools/synthetic` | Generators of benchmark models |
-| `docs/` | The documentation site's pages: user guides, and for developers the [architecture](docs/architecture.md), [contracts](docs/contracts.md), [decisions](docs/decisions/README.md), [benchmarks](docs/benchmarks.md) and [internals](docs/internals/engine.md) |
+| `docs/` | Documentation site sources: user guides, [architecture](docs/architecture.md), [contracts](docs/contracts.md), [decisions](docs/decisions/README.md), [benchmarks](docs/benchmarks.md), and [internals](docs/internals/engine.md) |
 
 ## Develop
 
-[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the commands, the rules and how to
-check against MCNP.
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the full setup, test rules, and oracle instructions.
 
 ```sh
-cargo test --release                       # unit, MCNP golden, property and CLI tests
-cargo test --release -p llevant-gpu -p llevant-viewer   # GPU renderer and viewer (skip without an adapter)
-cargo run --release -p llevant-bench       # benchmarks and checks: every command
+cargo test --release                                 # unit, MCNP golden, property, OpenMC, and CLI tests
+cargo test --release -p llevant-openmc               # OpenMC translator unit tests
+cargo test --release -p llevant --test openmc        # OpenMC engine integration tests
+cargo test --release -p llevant-gpu -p llevant-viewer # GPU renderer and viewer (skip without an adapter)
+pytest crates/llevant-py/tests/test_openmc.py        # Python OpenMC oracle & HDF5 statepoint tally tests
+cargo run --release -p llevant-bench                 # benchmarks and checks
 ```
 
 Licence: [EUPL-1.2](LICENSE).
