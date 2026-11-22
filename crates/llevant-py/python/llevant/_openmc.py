@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 import numpy as np
 
@@ -89,7 +89,7 @@ def from_openmc(
     *,
     tolerance: float = 1e-8,
     world_half_size: float = 1e6,
-    grid: str = "auto",
+    grid: Literal["auto", "always", "off"] = "auto",
 ) -> Model:
     """Compile an OpenMC ``Model``, ``Geometry``, ``(Geometry, Materials)``, XML text, or path.
 
@@ -1052,13 +1052,15 @@ def diagnose_lost_particles(
                 (px0 - radius, py0 - radius, pz0 - radius),
                 (px0 + radius, py0 + radius, pz0 + radius),
             )
-            for tag, axis_kw in (
-                ("xy", {"z": pz0}),
-                ("xz", {"y": py0}),
-                ("yz", {"x": px0}),
+            for tag, sx, sy, sz in (
+                ("xy", None, None, pz0),
+                ("xz", None, py0, None),
+                ("yz", px0, None, None),
             ):
                 img = model.slice(
-                    **axis_kw,
+                    x=sx,
+                    y=sy,
+                    z=sz,
                     region=reg,
                     width=px_clamped,
                     colour="material",

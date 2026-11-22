@@ -6,7 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 
 from ._llevant import (
     Model,
@@ -64,7 +64,7 @@ def from_tripoli(
     *,
     tolerance: float = 1e-8,
     world_half_size: float = 1e6,
-    grid: str = "auto",
+    grid: Literal["auto", "always", "off"] = "auto",
 ) -> Model:
     """Translate a TRIPOLI-4 deck (path or text) and compile it as a :class:`Model`."""
     mcnp = tripoli_to_mcnp(source)
@@ -94,7 +94,7 @@ def from_dragon(
     *,
     tolerance: float = 1e-8,
     world_half_size: float = 1e6,
-    grid: str = "auto",
+    grid: Literal["auto", "always", "off"] = "auto",
 ) -> Model:
     """Translate a DRAGON5 ``GEO:`` procedure (path or text) and compile it as a :class:`Model`."""
     mcnp = dragon_to_mcnp(source)
@@ -152,30 +152,39 @@ def render_openmc_plots(
             raise ValueError(f"plot {p['id']}: invalid width {p['width']!r}")
         ox, oy, oz = (float(c) for c in p["origin"])
         basis = str(p["basis"]).lower()
+        sx: Optional[float] = None
+        sy: Optional[float] = None
+        sz: Optional[float] = None
         if basis == "xy":
-            axis_kw: dict[str, float] = {"z": oz}
+            sz = oz
             reg = ((ox - 0.5 * wx, oy - 0.5 * wy, oz - 1.0), (ox + 0.5 * wx, oy + 0.5 * wy, oz + 1.0))
         elif basis == "xz":
-            axis_kw = {"y": oy}
+            sy = oy
             reg = ((ox - 0.5 * wx, oy - 1.0, oz - 0.5 * wy), (ox + 0.5 * wx, oy + 1.0, oz + 0.5 * wy))
         elif basis == "yz":
-            axis_kw = {"x": ox}
+            sx = ox
             reg = ((ox - 1.0, oy - 0.5 * wx, oz - 0.5 * wy), (ox + 1.0, oy + 0.5 * wx, oz + 0.5 * wy))
         else:
             raise ValueError(f"plot {p['id']}: unsupported basis {p['basis']!r}")
 
         width_px = max(1, int(px if px is not None else p["pixels"][0]))
         color_by = str(p["color_by"]).lower()
-        colour = color_by if color_by in ("cell", "material", "universe") else "material"
-        outline_by = colour if colour in ("cell", "material", "universe") else "cell"
+        colour: Literal["cell", "material", "universe"] = (
+            "cell"
+            if color_by == "cell"
+            else ("universe" if color_by == "universe" else "material")
+        )
+        outline_by: Literal["cell", "material", "universe"] = colour
 
         img = m.slice(
-            **axis_kw,
+            x=sx,
+            y=sy,
+            z=sz,
             region=reg,
             width=width_px,
-            colour=colour,  # type: ignore[arg-type]
+            colour=colour,
             outline=outlines,
-            outline_by=outline_by,  # type: ignore[arg-type]
+            outline_by=outline_by,
         )
 
         raw_name = Path(str(p["filename"]).strip()).name
@@ -244,13 +253,15 @@ def check_report(
                     tuple(min(lo[k], mid[k] - 0.5 * span) - 0.25 * span for k in range(3)),
                     tuple(max(hi[k], mid[k] + 0.5 * span) + 0.25 * span for k in range(3)),
                 )
-                for tag, kw in (
-                    ("xy", {"z": mid[2]}),
-                    ("xz", {"y": mid[1]}),
-                    ("yz", {"x": mid[0]}),
+                for tag, sx, sy, sz in (
+                    ("xy", None, None, mid[2]),
+                    ("xz", None, mid[1], None),
+                    ("yz", mid[0], None, None),
                 ):
                     img = model.slice(
-                        **kw,
+                        x=sx,
+                        y=sy,
+                        z=sz,
                         region=reg,
                         width=px_clamped,
                         colour="material",

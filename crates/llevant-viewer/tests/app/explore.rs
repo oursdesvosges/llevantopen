@@ -1251,8 +1251,10 @@ fn openmc_model_opens_and_searches_labels() {
         .build_eframe(|cc| {
             ViewerApp::new(cc, openmc_path.clone(), ViewState::new(), None).unwrap()
         });
-    step_until(&mut h, "the OpenMC model to load", |a| {
-        a.document().is_some() || a.error().is_some()
+    step_until(&mut h, "the OpenMC model and its labels", |a| {
+        a.document()
+            .is_some_and(|d| d.index.labels().is_some() && !d.deriving())
+            || a.error().is_some()
     });
     assert!(h.state().error().is_none(), "{:?}", h.state().error());
     let doc = h.state().document().unwrap();
@@ -1298,8 +1300,10 @@ fn tripoli4_model_opens_and_renders() {
         .with_size(egui::vec2(1200.0, 700.0))
         .wgpu_setup(llevant_viewer::app::wgpu_options().wgpu_setup)
         .build_eframe(|cc| ViewerApp::new(cc, t4_path.clone(), ViewState::new(), None).unwrap());
-    step_until(&mut h, "the TRIPOLI-4 model to load", |a| {
-        a.document().is_some() || a.error().is_some()
+    step_until(&mut h, "the TRIPOLI-4 model and its labels", |a| {
+        a.document()
+            .is_some_and(|d| d.index.labels().is_some() && !d.deriving())
+            || a.error().is_some()
     });
     assert!(h.state().error().is_none(), "{:?}", h.state().error());
     let doc = h.state().document().unwrap();
