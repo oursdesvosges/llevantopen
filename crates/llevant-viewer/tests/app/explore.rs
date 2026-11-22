@@ -1231,3 +1231,52 @@ fn the_3d_view_moves_to_the_gpu_once_the_model_is_uploaded() {
     });
     assert!(h.state().document().unwrap().view3d.stats().refined >= 1.0);
 }
+
+/// An OpenMC XML model opens directly in the viewer, resolves OpenMC cell
+/// `name="..."` labels in queries, and renders both 3D and slice views.
+#[test]
+fn openmc_model_opens_and_searches_labels() {
+    let _one = serial();
+    if !adapter_available() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
+    let openmc_path = PathBuf::from(format!(
+        "{}/../../docs/examples/openmc/fusion_hts_blanket.xml",
+        env!("CARGO_MANIFEST_DIR")
+    ));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 700.0))
+        .wgpu_setup(llevant_viewer::app::wgpu_options().wgpu_setup)
+        .build_eframe(|cc| {
+            ViewerApp::new(cc, openmc_path.clone(), ViewState::new(), None).unwrap()
+        });
+    step_until(&mut h, "the OpenMC model to load", |a| {
+        a.document().is_some() || a.error().is_some()
+    });
+    assert!(h.state().error().is_none(), "{:?}", h.state().error());
+    let doc = h.state().document().unwrap();
+    assert!(
+        doc.model.diagnostics().is_empty(),
+        "{:?}",
+        doc.model.diagnostics()
+    );
+
+    h.state_mut()
+        .document_mut()
+        .unwrap()
+        .execute(Command::Select(
+            "label \"Tungsten\"".parse().unwrap(),
+            SelectMode::Replace,
+        ));
+    settle(&mut h);
+    let doc = h.state().document().unwrap();
+    let tungsten = doc.model.cell_index(2).expect("Tungsten cell 2");
+    assert_eq!(doc.selection.cells.count(), 1);
+    assert!(doc.selection.cells.contains(tungsten));
+
+    step_until(&mut h, "3D and slice views to settle", |a| {
+        let d = a.document().unwrap();
+        !d.view3d.busy() && d.slice.progress() >= 1.0
+    });
+}

@@ -1,8 +1,9 @@
-# Supported MCNP input
+# Supported MCNP and OpenMC input
 
 llevant reads MCNP inputs through [migjorn](https://crates.io/crates/migjorn), and
 follows MCNP 6.2 wherever the two could differ: it has been checked point by point
-against MCNP itself ([how](../mcnp-behaviour.md)).
+against MCNP itself ([how](../mcnp-behaviour.md)). It also reads OpenMC XML models
+directly in pure Rust (`llevant-openmc`).
 
 ## Geometry
 
@@ -55,6 +56,34 @@ against MCNP itself ([how](../mcnp-behaviour.md)).
 
 Not drawn yet: surface tallies, point detectors, and each cell's own flux inside a
 cuvmsh voxel. Details: [Fields](../guide/cli.md#fields).
+
+## OpenMC XML input
+
+llevant translates OpenMC XML models into MCNP geometry natively (`llevant-openmc`)
+with zero OpenMC runtime dependency:
+
+- **Files and directories**: `model.xml`, `geometry.xml` (automatically discovering a
+  sibling `materials.xml`), or a directory containing either, as well as in-memory
+  XML strings via `Model::from_text` and Python `llevant.from_text`.
+- **Surfaces**: `x-plane`, `y-plane`, `z-plane`, `plane`, `sphere`, `x-cylinder`,
+  `y-cylinder`, `z-cylinder`, `x-cone`, `y-cone`, `z-cone`, `x-torus`, `y-torus`,
+  `z-torus`, and `quadric`, with `vacuum`, `reflective`, `white`, and `periodic`
+  outer boundary conditions.
+- **Cells, universes, and transforms**: boolean regions (intersection, `|` union,
+  `~` complement, parentheses), nested `universe`/`fill`, `translation`, and 3-angle
+  Euler or 9-entry `rotation`.
+- **Lattices**: 2-D and 3-D rectilinear `<lattice>` and hexagonal `<hex_lattice>`
+  (`orientation="y"` and `"x"`, `<outer>` padding).
+- **Materials and labels**: nuclide `ao`/`wo` and elemental compositions (`g/cm3`,
+  `kg/m3`, `atom/b-cm`, `atom/cm3`, `sum`), plus cell `name="..."` attributes exposed
+  to `label "..."` queries.
+- **Results (`read_openmc_tally`)**: in Python ([the Python guide](../guide/python.md)),
+  `llevant.read_openmc_tally(model, "statepoint.h5")` loads `cell`, `material`, and
+  `mesh` (`RegularMesh`, `RectilinearMesh`, `CylindricalMesh`) tallies directly from
+  OpenMC HDF5 statepoints (when `h5py` is installed).
+
+Examples: `docs/examples/openmc/fusion_hts_blanket.xml`, `pwr_pin_lattice.xml`, and
+`vver_hex_assembly.xml`.
 
 ## Labels
 

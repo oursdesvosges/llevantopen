@@ -618,7 +618,7 @@ fn collect_region_surface_senses(region: &str, out: &mut HashMap<i64, (bool, boo
 }
 
 /// Convert OpenMC Euler rotation angles (phi, theta, psi in degrees about x, y, z)
-/// or a 9-element row-major rotation matrix into a 3×3 matrix.
+/// or a 9-element row-major rotation matrix into a 3×3 parent-to-local matrix.
 fn openmc_rotation_matrix(rot: &[f64]) -> [[f64; 3]; 3] {
     if rot.len() >= 9 {
         return [
@@ -628,14 +628,16 @@ fn openmc_rotation_matrix(rot: &[f64]) -> [[f64; 3]; 3] {
         ];
     }
     if rot.len() >= 3 {
-        // OpenMC rotation=[phi, theta, psi] in degrees: R = Rz(psi) * Ry(theta) * Rx(phi)
-        let (sx, cx) = rot[0].to_radians().sin_cos();
-        let (sy, cy) = rot[1].to_radians().sin_cos();
-        let (sz, cz) = rot[2].to_radians().sin_cos();
+        // OpenMC Euler angles (phi, theta, psi in degrees) negate each angle
+        // when building the parent-to-local rotation matrix R:
+        // r_local = R * (r_parent - translation).
+        let (s3, c3) = (-rot[0]).to_radians().sin_cos();
+        let (s2, c2) = (-rot[1]).to_radians().sin_cos();
+        let (s1, c1) = (-rot[2]).to_radians().sin_cos();
         return [
-            [cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz],
-            [cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz],
-            [-sy, sx * cy, cx * cy],
+            [c1 * c2, c1 * s2 * s3 - c3 * s1, s1 * s3 + c1 * c3 * s2],
+            [c2 * s1, c1 * c3 + s1 * s2 * s3, c3 * s1 * s2 - c1 * s3],
+            [-s2, c2 * s3, c2 * c3],
         ];
     }
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -1427,16 +1429,21 @@ pub fn openmc_xml_to_mcnp(
         write_wrapped_mcnp_card(&mut mcnp, ctoks, comment.as_deref());
     }
 
-    // Synthesize exterior IMP:N=0 graveyard cell from vacuum boundaries (or single-sense outer surfaces)
+    // Synthesize exterior IMP:N=0 graveyard cell from outer boundary conditions (or single-sense outer surfaces)
     let mut exterior_terms: Vec<String> = Vec::new();
-    let vac_surfs: Vec<i64> = surfaces
+    let boundary_surfs: Vec<i64> = surfaces
         .values()
-        .filter(|s| s.boundary == "vacuum")
+        .filter(|s| {
+            matches!(
+                s.boundary.as_str(),
+                "vacuum" | "reflective" | "white" | "periodic"
+            )
+        })
         .map(|s| s.id)
         .collect();
 
-    if !vac_surfs.is_empty() {
-        for sid in vac_surfs {
+    if !boundary_surfs.is_empty() {
+        for sid in boundary_surfs {
             if let Some(&(seen_neg, seen_pos)) = root_senses.get(&sid) {
                 if seen_neg && !seen_pos {
                     exterior_terms.push(format!("{sid}"));
@@ -1727,5 +1734,64 @@ mod tests {
         assert!(norm.contains("fill=-3:3 -3:3 -1:2"), "{mcnp}");
         // Element [0,0,0] axial center: 1.0 + (0.5 - 1.0)*4.0 = -1.0
         assert!(norm.contains("tr1 0 0 -1"), "{mcnp}");
+    }
+
+    /// Verify Euler rotation angles match OpenMC's parent-to-local rotation matrix convention.
+    #[test]
+    fn rotation_matrix_matches_openmc_euler_convention() {
+        let r = openmc_rotation_matrix(&[30.0, 45.0, 60.0]);
+        let want = [
+            [0.35355339, 0.92677670, 0.12682648],
+            [-0.61237244, 0.12682648, 0.78033009],
+            [std::f64::consts::FRAC_1_SQRT_2, -0.35355339, 0.61237244],
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (r[i][j] - want[i][j]).abs() < 1e-7,
+                    "r[{i}][{j}] = {}, expected {}",
+                    r[i][j],
+                    want[i][j]
+                );
+            }
+        }
+        // Orthonormality check: R * R^T == I
+        for i in 0..3 {
+            for j in 0..3 {
+                let dot: f64 = (0..3).map(|k| r[i][k] * r[j][k]).sum();
+                let target = if i == j { 1.0 } else { 0.0 };
+                assert!((dot - target).abs() < 1e-12);
+            }
+        }
+    }
+
+    /// Verify mixed reflective/white/periodic and vacuum boundary surfaces all enter the graveyard cell.
+    #[test]
+    fn synthesizes_graveyard_for_mixed_reflective_and_vacuum_boundaries() {
+        let xml = r#"<model>
+  <materials>
+    <material id="1" name="Fuel"><density units="g/cm3" value="10.0"/><nuclide ao="1.0" name="U235"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="x-plane" coeffs="-5" boundary="reflective"/>
+    <surface id="2" type="x-plane" coeffs="5" boundary="reflective"/>
+    <surface id="3" type="y-plane" coeffs="-5" boundary="periodic"/>
+    <surface id="4" type="y-plane" coeffs="5" boundary="white"/>
+    <surface id="5" type="z-plane" coeffs="-10" boundary="vacuum"/>
+    <surface id="6" type="z-plane" coeffs="10" boundary="vacuum"/>
+    <cell id="1" material="1" region="1 -2 3 -4 5 -6"/>
+  </geometry>
+</model>"#;
+        let mcnp = openmc_xml_to_mcnp(xml, None).unwrap();
+        let grave_line = mcnp
+            .lines()
+            .find(|l| l.contains("imp:n=0"))
+            .expect("graveyard cell");
+        for term in ["-1", "2", "-3", "4", "-5", "6"] {
+            assert!(
+                grave_line.contains(term),
+                "missing `{term}` in graveyard: {grave_line}"
+            );
+        }
     }
 }

@@ -12,17 +12,19 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-EUPL--1.2-blue" alt="License: EUPL-1.2"></a>
 </p>
 
-Fast, exact geometry queries on MCNP models: an interactive viewer, a command line
+Fast, exact geometry queries on MCNP and OpenMC XML models: an interactive viewer, a command line
 and a Python module, on a Rust engine. llevant answers:
 
 - where points are, and what lines cross;
 - slices and 3D views;
 - volumes, and the gaps and overlaps of a model;
 - fingerprints that tell two versions of a model apart;
-- tally results (meshtal, MCTAL, per cell) drawn over the geometry.
+- tally results (meshtal, MCTAL, OpenMC HDF5 statepoint, per cell) drawn over the geometry.
 
-It reads the MCNP input (through [migjorn](https://crates.io/crates/migjorn)), with
-every surface and macrobody, universes at any depth, lattices and transforms.
+It reads MCNP input (through [migjorn](https://crates.io/crates/migjorn)) and OpenMC XML
+(`model.xml`, or a directory containing `geometry.xml` and `materials.xml`), with
+surfaces and macrobodies, universes at any depth, rectilinear and hexagonal lattices,
+and transforms.
 
 **Documentation: <https://fusion4energy.github.io/llevant/>**: install, a ten-minute
 tour, how-to guides and references.
@@ -103,12 +105,33 @@ On a 425 k-cell fusion reactor model, on a 16-thread laptop
 | Fingerprints of cells and universes; model diffs | `fingerprint` | `Model::fingerprints` |
 | A universe (a filler) as a model of its own | `--universe` | `Model::universe` |
 | Cell instances: each place a cell occupies, numbered | `locate` | `Model::instances` |
-| Results over the geometry: values per cell, instance or mesh voxel (CSV, meshtal, MCTAL, D1SUNED cuvmsh) | `slice`/`render --field` | `llevant_scene::field` |
+| Results over the geometry: values per cell, instance or mesh voxel (CSV, meshtal, MCTAL, D1SUNED cuvmsh, OpenMC HDF5 statepoint) | `slice`/`render --field` (`llevant.read_openmc_tally` in Python) | `llevant_scene::field` |
 | An interactive viewer: 3D view and slice, picking, rules, cuts, fields, FMESH layout, card editing | `llevant-viewer`, `llevant view` | `crates/llevant-viewer` |
 | Python: models kept in memory, numpy batch queries, inline images, the viewer | `python -m llevant` | `crates/llevant-py` |
 
-What MCNP input is read, and what is not:
+What MCNP and OpenMC input is read, and what is not:
 [Supported input](https://fusion4energy.github.io/llevant/reference/supported-input/).
+
+## OpenMC XML
+
+OpenMC models load natively in the CLI, Python, and viewer (no OpenMC runtime needed
+for geometry), including [`docs/examples/openmc/fusion_hts_blanket.xml`](docs/examples/openmc/fusion_hts_blanket.xml)
+and [`docs/examples/openmc/vver_hex_assembly.xml`](docs/examples/openmc/vver_hex_assembly.xml):
+
+```sh
+llevant info   docs/examples/openmc/fusion_hts_blanket.xml
+llevant slice  docs/examples/openmc/vver_hex_assembly.xml --plane z=0 --colour realistic -o vver.png
+llevant check  docs/examples/openmc/pwr_pin_lattice.xml --h 0.75
+```
+
+```python
+import llevant
+
+m = llevant.load("docs/examples/openmc/fusion_hts_blanket.xml")
+m.bbox('label "Tungsten"')                      # searches OpenMC cell name="..."
+f = llevant.read_openmc_tally(m, "statepoint.100.h5", score="flux")
+m.slice(z=0, field=f)
+```
 
 ## Library
 
@@ -156,6 +179,7 @@ and [`docs/contracts.md`](docs/contracts.md) lists what each query guarantees.
 | Path | Purpose |
 |---|---|
 | `crates/llevant` | The engine (pure Rust, geometry only) |
+| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`) |
 | `crates/llevant-scene` | What frontends build from a model: cell rules, hidden cells, material looks, field data and tally files, the input's cards, the cache of compiled models |
 | `crates/llevant-render` | Images: colours, colour scales, field looks, physically based shading, labels, PNG |
 | `crates/llevant-gpu` | The GPU renderer (wgpu) |

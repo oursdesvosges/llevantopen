@@ -216,3 +216,98 @@ fn loads_3d_hex_lattice_x_orientation_and_classifies_axial_slices() {
         .collect();
     assert_eq!(mats, vec![2, 3, 1, 1, 2, 3, 4]);
 }
+
+/// Verify rotated and translated child universes plus mixed reflective/vacuum outer boundaries.
+#[test]
+fn rotated_and_translated_universe_and_mixed_boundaries() {
+    let xml = r#"<model>
+  <materials>
+    <material id="1" name="Core"><density units="g/cm3" value="10.0"/><nuclide ao="1.0" name="U235"/></material>
+    <material id="2" name="Coolant"><density units="g/cm3" value="1.0"/><nuclide ao="2.0" name="H1"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="sphere" coeffs="3.0 0.0 0.0 1.5"/>
+    <surface id="10" type="x-plane" coeffs="-10.0" boundary="reflective"/>
+    <surface id="11" type="x-plane" coeffs="10.0" boundary="reflective"/>
+    <surface id="12" type="y-plane" coeffs="-10.0" boundary="reflective"/>
+    <surface id="13" type="y-plane" coeffs="10.0" boundary="reflective"/>
+    <surface id="14" type="z-plane" coeffs="-10.0" boundary="vacuum"/>
+    <surface id="15" type="z-plane" coeffs="10.0" boundary="vacuum"/>
+    <cell id="1" universe="2" material="1" region="-1" name="Offset Sphere"/>
+    <cell id="2" universe="2" material="2" region="1" name="Surrounding Water"/>
+    <cell id="10" universe="0" fill="2" region="10 -11 12 -13 14 -15"
+          translation="1.0 2.0 3.0" rotation="30.0 45.0 60.0" name="Rotated Region"/>
+  </geometry>
+</model>"#;
+
+    let model = Model::from_text(xml, &Options::default());
+    assert_eq!(model.diagnostics().len(), 0, "{:?}", model.diagnostics());
+
+    // Exact OpenMC R for rotation=(30, 45, 60): r_world = t + R^T * [3, 0, 0]
+    let (s3, c3) = (-30.0_f64).to_radians().sin_cos();
+    let (s2, c2) = (-45.0_f64).to_radians().sin_cos();
+    let (s1, c1) = (-60.0_f64).to_radians().sin_cos();
+    let r = [
+        [c1 * c2, c1 * s2 * s3 - c3 * s1, s1 * s3 + c1 * c3 * s2],
+        [c2 * s1, c1 * c3 + s1 * s2 * s3, c3 * s1 * s2 - c1 * s3],
+        [-s2, c2 * s3, c2 * c3],
+    ];
+    let center = [
+        1.0 + 3.0 * r[0][0],
+        2.0 + 3.0 * r[0][1],
+        3.0 + 3.0 * r[0][2],
+    ];
+    let pts = [center, [1.0, 2.0, 3.0]];
+    let cls = model.classify(&pts, Depth::All);
+    let mats: Vec<i64> = cls
+        .ids
+        .iter()
+        .map(|&id| model.cell(cls.labels[id as usize].cell().unwrap()).material)
+        .collect();
+    assert_eq!(mats, vec![1, 2]);
+
+    let region = model.extent(Scope::Problem, 64);
+    let vols = model
+        .volumes(&VolumeGrid::new(region, 2.0), None)
+        .expect("volume check");
+    assert!(
+        vols.problems().is_empty(),
+        "unexpected gaps/overlaps: {:?}",
+        vols.problems()
+    );
+}
+
+/// Verify loading a directory containing split `geometry.xml` and `materials.xml` files.
+#[test]
+fn split_geometry_and_materials_directory_loads_cleanly() {
+    let dir = std::env::temp_dir().join(format!("llevant-openmc-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("materials.xml"),
+        r#"<?xml version='1.0' encoding='utf-8'?>
+<materials>
+  <material id="7" name="Steel"><density units="g/cm3" value="7.9"/><nuclide ao="1.0" name="Fe56"/></material>
+</materials>
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("geometry.xml"),
+        r#"<?xml version='1.0' encoding='utf-8'?>
+<geometry>
+  <surface id="1" type="sphere" coeffs="0 0 0 8.0" boundary="vacuum"/>
+  <cell id="10" material="7" region="-1" name="Steel Ball"/>
+</geometry>
+"#,
+    )
+    .unwrap();
+
+    let model = Model::load(&dir, &Options::default(), None).expect("load split directory");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(model.diagnostics().len(), 0, "{:?}", model.diagnostics());
+    let lbl = model.classify_point([0.0, 0.0, 0.0]);
+    assert_eq!(lbl.status, Status::Inside);
+    assert_eq!(model.cell(lbl.cell().unwrap()).material, 7);
+}

@@ -6,21 +6,23 @@ hide:
 
 # llevant
 
-**See and check MCNP geometry, fast.** llevant reads an MCNP input file and tells you
+**See and check MCNP and OpenMC geometry, fast.** llevant reads an MCNP input file
+or OpenMC XML model (`model.xml`, `geometry.xml` + `materials.xml`) and tells you
 what is where in it. It works on any model, from a test problem to a 425 000-cell
 fusion reactor:
 
 - **look at it**: 3D views and exact slices, in an interactive viewer or as images;
-- **find mistakes**: gaps and overlaps (where MCNP loses particles), with their size
+- **find mistakes**: gaps and overlaps (where particles are lost), with their size
   and location;
 - **measure**: the volume and mass of every cell, material or universe, with an
   honest uncertainty;
 - **ask questions**: which cell holds this point, which cells this line crosses;
 - **compare**: which cells changed between two versions of a model;
-- **show results**: meshtal, MCTAL and per-cell results drawn over the geometry.
+- **show results**: meshtal, MCTAL, OpenMC statepoint tallies, and per-cell results drawn over the geometry.
 
-It reads every MCNP surface type and macrobody, universes and fills at any depth,
-lattices and transforms ([the full list](reference/supported-input.md)).
+It reads every MCNP surface type and macrobody, OpenMC CSG XML models (surfaces,
+universes, rectilinear and hexagonal lattices, rotations and materials), and
+transforms ([the full list](reference/supported-input.md)).
 
 ![The llevant viewer: a 3D view and a slice side by side](img/viewer.png)
 

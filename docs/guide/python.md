@@ -28,7 +28,7 @@ as a notebook: VS Code and PyCharm run its `# %%` cells, and
 ```python
 import llevant, numpy as np
 
-m = llevant.load("model.mcnp")          # compiled once (cached on disk), then queried as often as needed
+m = llevant.load("model.mcnp")          # or OpenMC XML (model.xml / dir); compiled once and cached
 m.locate(0, 0, 0)                       # <Label inside 12 > 304[1,-2,0] > 7>: .cell, .material, .path...
 r = m.classify(points)                  # (N, 3) array -> numpy columns: r.ids, r.cell, r.material, r.status
 tr = m.trace_lines(starts, ends)        # ragged: tr.offsets, tr.t0, tr.t1, tr.ids, tr.surface_in...
@@ -45,6 +45,7 @@ f = m.universe(20130)                   # a filler as a model of its own (cut="n
 r.to_polars(); tr.to_pandas()           # data frames, with polars or pandas installed
 m.locate(0, 0, 0).instance_path         # "7 < 304[1 -2 0] < 12": which copy of the cell
 f = llevant.Field.read(m, "run.msht", tally=14)   # or Field.cells(m, {12: 3.5}), .instances, .mesh
+f_sp = llevant.read_openmc_tally(m, "statepoint.10.h5", score="flux")  # OpenMC HDF5 cell, material, or mesh tally
 m.slice(z=37, field=f.with_scale(1e-6, 1e-2))      # values over the cells
 m.slice(z=37, field=f, outline_by="material")      # lines between materials only
 llevant.view("model.mcnp")              # the viewer; returns when its window closes

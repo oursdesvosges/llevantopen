@@ -1,16 +1,16 @@
-"""llevant: fast, exact queries on MCNP geometry.
+"""llevant: fast, exact queries on MCNP and OpenMC XML geometry.
 
 Load a model once, then query it::
 
     import llevant
-    m = llevant.load("model.i")
-    m.locate(0, 0, 0)               # where a point is
-    m.classify(points)              # many points: numpy columns
-    m.trace((0, 0, 0), (100, 0, 0)) # segments of a line
-    m.slice(z=0)                    # an image (shown inline in Jupyter)
+    m = llevant.load("model.i")        # or model.xml / geometry directory
+    m.locate(0, 0, 0)                  # where a point is
+    m.classify(points)                 # many points: numpy columns
+    m.trace((0, 0, 0), (100, 0, 0))    # segments of a line
+    m.slice(z=0)                       # an image (shown inline in Jupyter)
     m.volumes(h=1.0).by("material")
 
-Cells, materials and universes are MCNP numbers; lengths are in cm. The
+Cells, materials and universes keep their input numbers; lengths are in cm. The
 command line is ``python -m llevant --help``.
 """
 
@@ -42,6 +42,7 @@ from ._llevant import (
     set_threads,
     threads,
 )
+from ._openmc import read_openmc_tally
 
 def view(model=None, *, state=None, backend=None):
     """Open the interactive viewer on a model; returns when the window closes.
@@ -88,6 +89,7 @@ __all__ = [
     "from_text",
     "load",
     "main",
+    "read_openmc_tally",
     "set_threads",
     "threads",
     "view",

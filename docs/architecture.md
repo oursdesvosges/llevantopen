@@ -97,6 +97,9 @@ Planned, not built yet:
 ## Crates
 
 ```
+                    llevant-openmc (OpenMC XML -> MCNP translation)
+                       │       │
+                       ▼       ▼
                     llevant  (engine: geometry only)
                     ▲      ▲
                     │   llevant-scene  (rules, hiding, looks, field data, input cards, cache)
@@ -114,6 +117,7 @@ Planned, not built yet:
 | Crate | Owns | Default member |
 |---|---|---|
 | `crates/llevant` | The engine: compile, classify, trace, first hits, slices and cameras, fingerprints, instances, universes on their own, volumes, `save`/`read`, `export` (the GPU's format) | yes |
+| `crates/llevant-openmc` | Pure-Rust OpenMC XML translator (`model.xml`, `geometry.xml` + `materials.xml`) to canonical MCNP input | yes |
 | `crates/llevant-scene` | What frontends build from a model: cell rules (`query`, `index`), what 3D views hide (`hiding`), material looks (`Looks`), field data and tally reading (`field`), the input's cards (`source`), the disk cache (`store`) | yes |
 | `crates/llevant-render` | Pixels: colours (`Paint`), colour scales, how fields are drawn, direct physically based shading, labels, ghost shells, PNG | yes |
 | `crates/llevant-cli` | The `llevant` command (`run_cli`, also behind `python -m llevant`; one JSON vocabulary in `json.rs`); features `gpu` and `viewer` | yes |

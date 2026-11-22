@@ -24,6 +24,7 @@ llevant slice  model.mcnp --plane z=37 --field heat.csv --outline-by material -o
 llevant render model.mcnp --field run.msht --tally 14 --log -o flux.png # an FMESH tally
 llevant view   model.mcnp                     # the viewer (feature `viewer`)
 llevant view                                  # its start screen: open a model from it
+llevant check  model.xml --h 1.0              # OpenMC XML models work with every command
 ```
 
 ## Regions, labels and levels
