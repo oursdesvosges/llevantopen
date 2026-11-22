@@ -392,6 +392,19 @@ struct OpenMcLattice {
     outer: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct OpenMcHexLattice {
+    id: i64,
+    name: String,
+    n_rings: usize,
+    n_axial: Option<usize>,
+    orientation: char,
+    center: Vec<f64>,
+    pitch: Vec<f64>,
+    universes: Vec<i64>,
+    outer: Option<i64>,
+}
+
 /// Parse a whitespace-separated list of 64-bit floating-point numbers.
 fn parse_f64_list(s: &str) -> Result<Vec<f64>, OpenMcError> {
     s.split_whitespace()
@@ -660,6 +673,96 @@ fn write_wrapped_mcnp_card(buf: &mut String, tokens: &[String], comment: Option<
     buf.push('\n');
 }
 
+/// Map an OpenMC `<hex_lattice>` XML `<universes>` token stream into
+/// `(i1, i2, iz) -> universe_id` lattice element coordinates matching MCNP `LAT=2`.
+fn parse_hex_lattice_grid(
+    hlat: &OpenMcHexLattice,
+) -> Result<HashMap<(i64, i64, i64), i64>, OpenMcError> {
+    let n_rings = hlat.n_rings as i64;
+    if n_rings < 1 {
+        return Err(OpenMcError::Parse(format!(
+            "hex_lattice {} requires n_rings >= 1",
+            hlat.id
+        )));
+    }
+    let nz = hlat.n_axial.unwrap_or(1);
+    if hlat.n_axial.is_some() && nz < 1 {
+        return Err(OpenMcError::Parse(format!(
+            "hex_lattice {} requires n_axial >= 1",
+            hlat.id
+        )));
+    }
+    let expected_per_slice = if hlat.n_rings == 1 {
+        1
+    } else {
+        1 + 3 * hlat.n_rings * (hlat.n_rings - 1)
+    };
+    let expected_total = expected_per_slice * nz;
+    if hlat.universes.len() < expected_total {
+        return Err(OpenMcError::Parse(format!(
+            "hex_lattice {} expected {expected_total} universe entries, got {}",
+            hlat.id,
+            hlat.universes.len()
+        )));
+    }
+
+    let is_valid = |i1: i64, i2: i64| i1.abs().max(i2.abs()).max((-i1 - i2).abs()) < n_rings;
+    let mut grid = HashMap::with_capacity(expected_total);
+    let mut j = 0usize;
+
+    for iz in 0..nz as i64 {
+        if hlat.orientation == 'y' {
+            let mut x = 0i64;
+            let mut alpha = n_rings - 1;
+            loop {
+                let u = *hlat.universes.get(j).ok_or_else(|| {
+                    OpenMcError::Parse(format!("hex_lattice {} universe stream truncated", hlat.id))
+                })?;
+                grid.insert((x, alpha, iz), u);
+                j += 1;
+
+                x += 2;
+                alpha -= 1;
+                if !is_valid(x, alpha) {
+                    alpha += x - 1;
+                    x = 1 - x;
+                    if !is_valid(x, alpha) {
+                        x += 2;
+                        alpha -= 1;
+                        if !is_valid(x, alpha) {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut alpha = 1 - n_rings;
+            let mut y = n_rings - 1;
+            loop {
+                let u = *hlat.universes.get(j).ok_or_else(|| {
+                    OpenMcError::Parse(format!("hex_lattice {} universe stream truncated", hlat.id))
+                })?;
+                grid.insert((alpha, y, iz), u);
+                j += 1;
+
+                alpha += 1;
+                if !is_valid(alpha, y) {
+                    alpha = 1 - n_rings;
+                    y -= 1;
+                    if y == -n_rings {
+                        break;
+                    }
+                    while !is_valid(alpha, y) {
+                        alpha += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(grid)
+}
+
 /// Format a floating-point number without trailing zeroes or `-0`.
 fn fmt_num(v: f64) -> String {
     if v == 0.0 {
@@ -778,6 +881,105 @@ pub fn openmc_xml_to_mcnp(
         );
     }
 
+    // Parse hexagonal lattices
+    let mut raw_hex_lats = Vec::new();
+    collect_elements(&geom_roots, "hex_lattice", &mut raw_hex_lats);
+    let mut hex_lattices: BTreeMap<i64, OpenMcHexLattice> = BTreeMap::new();
+
+    for lnode in raw_hex_lats {
+        let id: i64 = lnode
+            .attr("id")
+            .ok_or_else(|| OpenMcError::Parse("<hex_lattice> missing `id`".into()))?
+            .parse()
+            .map_err(|_| OpenMcError::Parse("invalid hex_lattice id".into()))?;
+        let name = lnode.attr("name").unwrap_or("").to_string();
+        let n_rings: usize = lnode
+            .attr("n_rings")
+            .ok_or_else(|| OpenMcError::Parse(format!("hex_lattice {id} missing `n_rings`")))?
+            .trim()
+            .parse()
+            .map_err(|_| OpenMcError::Parse(format!("invalid hex_lattice {id} `n_rings`")))?;
+        if n_rings < 1 {
+            return Err(OpenMcError::Parse(format!(
+                "hex_lattice {id} requires n_rings >= 1"
+            )));
+        }
+        let n_axial = match lnode.attr("n_axial") {
+            Some(s) => {
+                let v = s.trim().parse::<usize>().map_err(|_| {
+                    OpenMcError::Parse(format!("invalid hex_lattice {id} `n_axial`"))
+                })?;
+                if v < 1 {
+                    return Err(OpenMcError::Parse(format!(
+                        "hex_lattice {id} requires n_axial >= 1"
+                    )));
+                }
+                Some(v)
+            }
+            None => None,
+        };
+        let orient_str = lnode
+            .attr("orientation")
+            .unwrap_or("y")
+            .trim()
+            .to_ascii_lowercase();
+        let orientation = match orient_str.as_str() {
+            "y" => 'y',
+            "x" => 'x',
+            other => {
+                return Err(OpenMcError::Parse(format!(
+                    "hex_lattice {id} unsupported orientation `{other}`"
+                )));
+            }
+        };
+        let center =
+            parse_f64_list(lnode.child_text("center").ok_or_else(|| {
+                OpenMcError::Parse(format!("hex_lattice {id} missing <center>"))
+            })?)?;
+        let pitch = parse_f64_list(
+            lnode
+                .child_text("pitch")
+                .ok_or_else(|| OpenMcError::Parse(format!("hex_lattice {id} missing <pitch>")))?,
+        )?;
+        if pitch.is_empty() || !(pitch[0] > 0.0) {
+            return Err(OpenMcError::Parse(format!(
+                "hex_lattice {id} requires positive <pitch>"
+            )));
+        }
+        if center.len() < 2 {
+            return Err(OpenMcError::Parse(format!(
+                "hex_lattice {id} <center> requires at least 2 coordinates"
+            )));
+        }
+        if n_axial.is_some() && (center.len() < 3 || pitch.len() < 2) {
+            return Err(OpenMcError::Parse(format!(
+                "3D hex_lattice {id} requires 3D <center> and 2D <pitch>"
+            )));
+        }
+        let universes =
+            parse_i64_list(lnode.child_text("universes").ok_or_else(|| {
+                OpenMcError::Parse(format!("hex_lattice {id} missing <universes>"))
+            })?)?;
+        let outer = lnode
+            .child_text("outer")
+            .and_then(|s| s.parse::<i64>().ok());
+
+        hex_lattices.insert(
+            id,
+            OpenMcHexLattice {
+                id,
+                name,
+                n_rings,
+                n_axial,
+                orientation,
+                center,
+                pitch,
+                universes,
+                outer,
+            },
+        );
+    }
+
     // Parse cells
     let mut raw_cells = Vec::new();
     collect_elements(&geom_roots, "cell", &mut raw_cells);
@@ -855,6 +1057,14 @@ pub fn openmc_xml_to_mcnp(
             filled_targets.insert(ou);
         }
     }
+    for hlat in hex_lattices.values() {
+        for &u in &hlat.universes {
+            filled_targets.insert(u);
+        }
+        if let Some(ou) = hlat.outer {
+            filled_targets.insert(ou);
+        }
+    }
 
     // Detect OpenMC root universe: universe 0 if present, else lowest cell universe not referenced by any fill/lattice
     let root_universe = if all_cell_universes.contains(&0) {
@@ -871,6 +1081,9 @@ pub fn openmc_xml_to_mcnp(
     for lat in lattices.values() {
         max_univ_id = max_univ_id.max(lat.id);
     }
+    for hlat in hex_lattices.values() {
+        max_univ_id = max_univ_id.max(hlat.id);
+    }
 
     // Synthesize MCNP transforms (TRn), lattice helper universes, and extra bounding planes
     type McnpTransform = (i64, [f64; 3], Option<[[f64; 3]; 3]>);
@@ -879,13 +1092,14 @@ pub fn openmc_xml_to_mcnp(
     let mut next_surf_id: i64 = (max_surf_id + 100).max(10000);
     let mut next_cell_id: i64 = (max_cell_id + 100).max(10000);
     let base_univ_id: i64 = (max_univ_id + 100).max(1000);
+    let mut next_lat_univs = base_univ_id..;
 
     let mut extra_surfaces: Vec<(i64, String, String)> = Vec::new();
     let mut extra_cells: Vec<(Vec<String>, Option<String>)> = Vec::new();
 
     // Map each OpenMC lattice ID -> (synthesized MCNP universe ID, element [0,0,0] center offset)
     let mut lat_to_mcnp: HashMap<i64, (i64, [f64; 3])> = HashMap::new();
-    for (u_lat, lat) in (base_univ_id..).zip(lattices.values()) {
+    for (u_lat, lat) in next_lat_univs.by_ref().zip(lattices.values()) {
         let nx = *lat.dimension.first().unwrap_or(&1);
         let ny = *lat.dimension.get(1).unwrap_or(&1);
         let is_3d = lat.dimension.len() >= 3 && lat.lower_left.len() >= 3 && lat.pitch.len() >= 3;
@@ -976,6 +1190,157 @@ pub fn openmc_xml_to_mcnp(
         lat_to_mcnp.insert(lat.id, (u_lat, c0));
     }
 
+    // Synthesize MCNP LAT=2 cells for OpenMC <hex_lattice> elements
+    let sqrt3_half = 3.0_f64.sqrt() * 0.5;
+    for (u_lat, hlat) in next_lat_univs.zip(hex_lattices.values()) {
+        let grid = parse_hex_lattice_grid(hlat)?;
+        let is_3d = hlat.n_axial.is_some();
+        let nz = hlat.n_axial.unwrap_or(1);
+        let p_xy = hlat.pitch[0];
+        let hp = 0.5 * p_xy;
+        let pz = if is_3d { hlat.pitch[1] } else { 0.0 };
+
+        let c0 = [
+            hlat.center[0],
+            hlat.center[1],
+            if is_3d {
+                hlat.center[2] + (0.5 - 0.5 * nz as f64) * pz
+            } else {
+                0.0
+            },
+        ];
+
+        let lat_cell_id = next_cell_id;
+        next_cell_id += 1;
+
+        let s0 = next_surf_id;
+        let s1 = next_surf_id + 1;
+        let s2 = next_surf_id + 2;
+        let s3 = next_surf_id + 3;
+        let s4 = next_surf_id + 4;
+        let s5 = next_surf_id + 5;
+        next_surf_id += 6;
+
+        // MCNP LAT=2 surface order: +a, -a, +b, -b, +(b-a), -(b-a), then optional +z, -z
+        if hlat.orientation == 'x' {
+            extra_surfaces.push((s0, "px".into(), fmt_num(hp)));
+            extra_surfaces.push((s1, "px".into(), fmt_num(-hp)));
+            extra_surfaces.push((
+                s2,
+                "p".into(),
+                format!("0.5 {} 0 {}", fmt_num(sqrt3_half), fmt_num(hp)),
+            ));
+            extra_surfaces.push((
+                s3,
+                "p".into(),
+                format!("0.5 {} 0 {}", fmt_num(sqrt3_half), fmt_num(-hp)),
+            ));
+            extra_surfaces.push((
+                s4,
+                "p".into(),
+                format!("-0.5 {} 0 {}", fmt_num(sqrt3_half), fmt_num(hp)),
+            ));
+            extra_surfaces.push((
+                s5,
+                "p".into(),
+                format!("-0.5 {} 0 {}", fmt_num(sqrt3_half), fmt_num(-hp)),
+            ));
+        } else {
+            extra_surfaces.push((
+                s0,
+                "p".into(),
+                format!("{} 0.5 0 {}", fmt_num(sqrt3_half), fmt_num(hp)),
+            ));
+            extra_surfaces.push((
+                s1,
+                "p".into(),
+                format!("{} 0.5 0 {}", fmt_num(sqrt3_half), fmt_num(-hp)),
+            ));
+            extra_surfaces.push((s2, "py".into(), fmt_num(hp)));
+            extra_surfaces.push((s3, "py".into(), fmt_num(-hp)));
+            extra_surfaces.push((
+                s4,
+                "p".into(),
+                format!("-{} 0.5 0 {}", fmt_num(sqrt3_half), fmt_num(hp)),
+            ));
+            extra_surfaces.push((
+                s5,
+                "p".into(),
+                format!("-{} 0.5 0 {}", fmt_num(sqrt3_half), fmt_num(-hp)),
+            ));
+        }
+
+        let mut region_toks = vec![
+            format!("-{s0}"),
+            format!("{s1}"),
+            format!("-{s2}"),
+            format!("{s3}"),
+            format!("-{s4}"),
+            format!("{s5}"),
+        ];
+        if is_3d {
+            let hpz = 0.5 * pz;
+            let s6 = next_surf_id;
+            let s7 = next_surf_id + 1;
+            next_surf_id += 2;
+            extra_surfaces.push((s6, "pz".into(), fmt_num(hpz)));
+            extra_surfaces.push((s7, "pz".into(), fmt_num(-hpz)));
+            region_toks.push(format!("-{s6}"));
+            region_toks.push(format!("{s7}"));
+        }
+
+        let r_max = (hlat.n_rings as i64) - 1;
+        let pad = if hlat.outer.is_some() {
+            if r_max <= 10 {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        };
+        let i_lo = -(r_max + pad);
+        let i_hi = r_max + pad;
+        let j_lo = -(r_max + pad);
+        let j_hi = r_max + pad;
+        let k_pad = i64::from(is_3d && hlat.outer.is_some());
+        let k_lo = -k_pad;
+        let k_hi = if is_3d { (nz as i64 - 1) + k_pad } else { 0 };
+
+        let ni = (i_hi - i_lo + 1) as usize;
+        let nj = (j_hi - j_lo + 1) as usize;
+        let nk = (k_hi - k_lo + 1) as usize;
+        let mut fill_vals = Vec::with_capacity(ni * nj * nk);
+        for k in k_lo..=k_hi {
+            for j in j_lo..=j_hi {
+                for i in i_lo..=i_hi {
+                    let u_elem = grid
+                        .get(&(i, j, k))
+                        .copied()
+                        .or(hlat.outer)
+                        .unwrap_or(u_lat);
+                    fill_vals.push(u_elem.to_string());
+                }
+            }
+        }
+
+        let mut ctoks = vec![lat_cell_id.to_string(), "0".to_string()];
+        ctoks.extend(region_toks);
+        ctoks.push(format!("u={u_lat}"));
+        ctoks.push("lat=2".to_string());
+        ctoks.push("imp:n=1".to_string());
+        ctoks.push(format!("fill={i_lo}:{i_hi} {j_lo}:{j_hi} {k_lo}:{k_hi}"));
+        ctoks.extend(fill_vals);
+
+        let comment = if hlat.name.is_empty() {
+            format!("OpenMC hex_lattice {}", hlat.id)
+        } else {
+            format!("OpenMC hex_lattice {} ({})", hlat.id, hlat.name)
+        };
+        extra_cells.push((ctoks, Some(comment)));
+        lat_to_mcnp.insert(hlat.id, (u_lat, c0));
+    }
+
     // Track root-cell surface senses to synthesize an exact IMP:N=0 exterior graveyard
     let mut root_senses: HashMap<i64, (bool, bool)> = HashMap::new();
     for cell in &cells {
@@ -1029,12 +1394,18 @@ pub fn openmc_xml_to_mcnp(
             };
 
             let mut disp = cell.translation.unwrap_or([0.0, 0.0, 0.0]);
-            if let Some(c0) = lat_offset {
-                disp[0] += c0[0];
-                disp[1] += c0[1];
-                disp[2] += c0[2];
-            }
             let rot_mat = cell.rotation.as_deref().map(openmc_rotation_matrix);
+            if let Some(c0) = lat_offset {
+                if let Some(r) = rot_mat {
+                    for k in 0..3 {
+                        disp[k] += r[0][k] * c0[0] + r[1][k] * c0[1] + r[2][k] * c0[2];
+                    }
+                } else {
+                    disp[0] += c0[0];
+                    disp[1] += c0[1];
+                    disp[2] += c0[2];
+                }
+            }
             let has_tr = disp.iter().any(|&v| v.abs() > 1e-12) || rot_mat.is_some();
 
             if has_tr {
@@ -1276,5 +1647,85 @@ mod tests {
         assert!(norm.contains("lat=1"), "{mcnp}");
         assert!(norm.contains("fill=0:1 0:1 0:0 2 2 2 2"), "{mcnp}");
         assert!(norm.contains("tr1 -0.63 -0.63 0"), "{mcnp}");
+    }
+
+    /// Verify 2D OpenMC `<hex_lattice>` translation for both `y` and `x` orientations.
+    #[test]
+    fn translates_2d_hex_lattice_y_and_x_orientations() {
+        for orient in ["y", "x"] {
+            let xml = format!(
+                r#"<model>
+  <materials>
+    <material id="1" name="Fuel"><density units="g/cm3" value="10.4"/><nuclide ao="1.0" name="U235"/></material>
+    <material id="2" name="Water"><density units="g/cm3" value="0.72"/><nuclide ao="2.0" name="H1"/><nuclide ao="1.0" name="O16"/></material>
+    <material id="3" name="Poison"><density units="g/cm3" value="2.5"/><nuclide ao="1.0" name="B10"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="z-cylinder" coeffs="0 0 0.4"/>
+    <surface id="2" type="z-cylinder" coeffs="0 0 3.0" boundary="vacuum"/>
+    <cell id="1" universe="1" material="1" region="-1"/>
+    <cell id="2" universe="1" material="2" region="1"/>
+    <cell id="3" universe="3" material="3" region="-1"/>
+    <cell id="4" universe="3" material="2" region="1"/>
+    <cell id="5" universe="2" material="2"/>
+    <hex_lattice id="100" n_rings="2" orientation="{orient}">
+      <pitch>2.0</pitch>
+      <outer>2</outer>
+      <center>1.5 -0.5</center>
+      <universes>
+        1 1
+        1 3 1
+        1 1
+      </universes>
+    </hex_lattice>
+    <cell id="10" universe="0" fill="100" region="-2"/>
+  </geometry>
+</model>"#
+            );
+            let mcnp = openmc_xml_to_mcnp(&xml, None).unwrap();
+            let norm = mcnp.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(norm.contains("lat=2"), "{mcnp}");
+            assert!(norm.contains("fill=-3:3 -3:3 0:0"), "{mcnp}");
+            assert!(norm.contains("tr1 1.5 -0.5 0"), "{mcnp}");
+        }
+    }
+
+    /// Verify 3D OpenMC `<hex_lattice>` with multiple axial tiers translates `n_axial` pitch & fill bounds.
+    #[test]
+    fn translates_3d_hex_lattice_with_axial_layers() {
+        let xml = r#"<model>
+  <materials>
+    <material id="1" name="Fuel"><density units="g/cm3" value="10.4"/><nuclide ao="1.0" name="U235"/></material>
+    <material id="2" name="Poison"><density units="g/cm3" value="2.5"/><nuclide ao="1.0" name="B10"/></material>
+    <material id="3" name="Coolant"><density units="g/cm3" value="0.72"/><nuclide ao="1.0" name="H1"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="z-cylinder" coeffs="0 0 0.4"/>
+    <surface id="2" type="z-cylinder" coeffs="0 0 3.0" boundary="vacuum"/>
+    <surface id="3" type="z-plane" coeffs="-6.0" boundary="vacuum"/>
+    <surface id="4" type="z-plane" coeffs="6.0" boundary="vacuum"/>
+    <cell id="1" universe="1" material="1" region="-1"/>
+    <cell id="2" universe="1" material="3" region="1"/>
+    <cell id="3" universe="2" material="2" region="-1"/>
+    <cell id="4" universe="2" material="3" region="1"/>
+    <cell id="5" universe="3" material="3"/>
+    <hex_lattice id="100" n_rings="2" n_axial="2" orientation="x">
+      <pitch>2.0 4.0</pitch>
+      <outer>3</outer>
+      <center>0.0 0.0 1.0</center>
+      <universes>
+        1 1 1 1 1 1 1
+        2 2 2 2 2 2 2
+      </universes>
+    </hex_lattice>
+    <cell id="10" universe="0" fill="100" region="-2 3 -4"/>
+  </geometry>
+</model>"#;
+        let mcnp = openmc_xml_to_mcnp(xml, None).unwrap();
+        let norm = mcnp.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(norm.contains("lat=2"), "{mcnp}");
+        assert!(norm.contains("fill=-3:3 -3:3 -1:2"), "{mcnp}");
+        // Element [0,0,0] axial center: 1.0 + (0.5 - 1.0)*4.0 = -1.0
+        assert!(norm.contains("tr1 0 0 -1"), "{mcnp}");
     }
 }

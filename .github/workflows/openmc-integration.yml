@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - 'crates/llevant-openmc/**'
+      - 'crates/llevant-scene/src/labels.rs'
+      - 'crates/llevant/src/model.rs'
       - 'crates/llevant/tests/openmc.rs'
       - 'docs/examples/openmc/**'
   push:
-    branches: [feature/openmc-integration]
+    branches: [main, feature/openmc-integration]
 
 jobs:
   test:
@@ -17,5 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run llevant-openmc unit tests
         run: cargo test --release -p llevant-openmc
+      - name: Run llevant-scene label tests
+        run: cargo test --release -p llevant-scene --lib labels
       - name: Run llevant OpenMC XML integration tests
         run: cargo test --release -p llevant --test openmc

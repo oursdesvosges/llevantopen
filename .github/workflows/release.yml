@@ -58,9 +58,12 @@ jobs:
           if [ -n "$(git ls-remote --tags origin "refs/tags/v$version")" ]; then
             echo "v$version is already released"
             echo "release=false" >> "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_REPOSITORY" = "Fusion4Energy/llevant" ]; then
             echo "::notice::releasing v$version"
             echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo "skipping automatic crates.io/PyPI release on fork ($GITHUB_REPOSITORY); use workflow_dispatch to build artifacts"
+            echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "v$version is not released yet; a run by hand only builds it"
             echo "release=false" >> "$GITHUB_OUTPUT"

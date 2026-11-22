@@ -78,19 +78,24 @@ impl Labels {
     }
 
     /// The labels of the input at `path` (parsed again: the compiled model
-    /// has no text).
+    /// has no text). Supports MCNP decks and OpenMC XML models/directories.
     pub fn read(path: impl AsRef<Path>) -> Result<Labels> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|source| Error::Io {
-            path: path.to_path_buf(),
-            source,
+        let bytes = llevant_openmc::read_input_bytes(path).map_err(|e| match e {
+            llevant_openmc::OpenMcError::Io { path, source } => Error::Io { path, source },
+            other => Error::Invalid(other.to_string()),
         })?;
         Ok(Labels::of_text(&String::from_utf8_lossy(&bytes)))
     }
 
-    /// The labels of input text.
+    /// The labels of input text (MCNP or OpenMC XML).
     pub fn of_text(text: &str) -> Labels {
-        Labels::of(&migjorn::Model::parse(text))
+        match llevant_openmc::maybe_translate_bytes(text.as_bytes()) {
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                Labels::of(&migjorn::Model::parse(&String::from_utf8_lossy(&bytes)))
+            }
+            _ => Labels::of(&migjorn::Model::parse(text)),
+        }
     }
 
     /// The MCNP numbers of the cells with a label containing `text`, any
@@ -234,5 +239,30 @@ fc4 the $ in a tally comment, HNB\r
                 .collect();
             assert_eq!(l.matching(text), expect, "{text:?}");
         }
+    }
+
+    /// Verify OpenMC cell `name` attributes are extracted as searchable labels from text and files.
+    #[test]
+    fn labels_from_openmc_text_and_file() {
+        let xml = r#"<model>
+  <materials>
+    <material id="1" name="Tungsten"><density units="g/cm3" value="19.25"/><nuclide ao="1.0" name="W184"/></material>
+  </materials>
+  <geometry>
+    <surface id="1" type="sphere" coeffs="0 0 0 10" boundary="vacuum"/>
+    <cell id="7" material="1" region="-1" name="Tungsten First Wall Armor"/>
+  </geometry>
+</model>"#;
+        let l = Labels::of_text(xml);
+        assert_eq!(l.matching("tungsten"), [7]);
+        assert_eq!(l.matching("FIRST WALL"), [7]);
+        assert!(l.matching("nonexistent").is_empty());
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/examples/openmc/fusion_hts_blanket.xml");
+        let file_labels = Labels::read(&path).expect("read OpenMC XML labels");
+        assert_eq!(file_labels.matching("Tungsten"), [2]);
+        assert_eq!(file_labels.matching("Cryostat"), [10]);
+        assert_eq!(file_labels.matching("Breeder"), [4]);
     }
 }

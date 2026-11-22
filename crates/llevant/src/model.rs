@@ -458,12 +458,18 @@ impl Model {
         Ok((m, changes.expect("a recompile reports its changes")))
     }
 
-    /// Compile MCNP input text. It never fails: what MCNP would reject, and
-    /// what llevant does not support, is listed in [`Model::diagnostics`].
+    /// Compile MCNP or OpenMC XML input text. It never fails: what MCNP would
+    /// reject, and what llevant does not support, is listed in [`Model::diagnostics`].
     /// [`Model::compile`] does the same from bytes, and can be cancelled.
     pub fn from_text(text: &str, opts: &Options) -> Model {
         let t = Instant::now();
-        let parsed = migjorn::Model::parse(text);
+        let translated = llevant_openmc::maybe_translate_bytes(text.as_bytes());
+        let parsed = match &translated {
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                migjorn::Model::parse(&String::from_utf8_lossy(bytes))
+            }
+            _ => migjorn::Model::parse(text),
+        };
         let parse = t.elapsed().as_secs_f64();
         let mut m = Model::from_migjorn(&parsed, opts);
         m.timings.insert(0, ("parse", parse));

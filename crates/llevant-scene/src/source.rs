@@ -150,10 +150,15 @@ impl Source {
         Ok(Source::from_str(&String::from_utf8_lossy(&bytes)))
     }
 
-    /// The cards of input text.
+    /// The cards of input text (MCNP or OpenMC XML).
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Source {
-        Source::from_tree(migjorn::Model::parse(text))
+        match llevant_openmc::maybe_translate_bytes(text.as_bytes()) {
+            Ok(std::borrow::Cow::Owned(bytes)) => {
+                Source::from_tree(migjorn::Model::parse(&String::from_utf8_lossy(&bytes)))
+            }
+            _ => Source::from_tree(migjorn::Model::parse(text)),
+        }
     }
 
     /// The cards of a parsed input.
