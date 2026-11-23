@@ -1,6 +1,6 @@
 # Llevant Use-Case Examples
 
-Minimal input fixtures in `docs/examples/` combined with runnable end-to-end recipes in [`crates/llevant-py/examples/use_cases.py`](../../crates/llevant-py/examples/use_cases.py).
+Minimal input fixtures in `docs/examples/` combined with runnable end-to-end recipes in `crates/llevant-py/examples/use_cases.py`.
 
 ## Showcase Video
 

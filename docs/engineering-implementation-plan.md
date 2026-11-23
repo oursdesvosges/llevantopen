@@ -8,13 +8,13 @@
 
 ## Table of Contents
 
-1. [Executive Summary & Scope Boundary](#1-executive-summary--scope-boundary)
-2. [Verified Codebase & Interface Baseline (R2)](#2-verified-codebase--interface-baseline-r2)
-3. [Cross-Ecosystem Feature Catalog & Baseline Cross-Reference (R1 + R2)](#3-cross-ecosystem-feature-catalog--baseline-cross-reference-r1--r2)
+1. [Executive Summary & Scope Boundary](#1-executive-summary-scope-boundary)
+2. [Verified Codebase & Interface Baseline (R2)](#2-verified-codebase-interface-baseline-r2)
+3. [Cross-Ecosystem Feature Catalog & Baseline Cross-Reference (R1 + R2)](#3-cross-ecosystem-feature-catalog-baseline-cross-reference-r1-r2)
 4. [Target System Architecture (R3)](#4-target-system-architecture-r3)
 5. [Concrete Data Structures (R3)](#5-concrete-data-structures-r3)
 6. [Maximum-Performance Engineering Design (R3)](#6-maximum-performance-engineering-design-r3)
-7. [Target Interface Specifications (R2 + R3)](#7-target-interface-specifications-r2--r3)
+7. [Target Interface Specifications (R2 + R3)](#7-target-interface-specifications-r2-r3)
 8. [Prioritized Phased Implementation Roadmap (R3)](#8-prioritized-phased-implementation-roadmap-r3)
 
 ---
