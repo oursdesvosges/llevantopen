@@ -1,5 +1,8 @@
 //! Batch point classification through universes.
 
+use std::mem;
+use std::sync::Mutex;
+
 use rayon::prelude::*;
 
 use crate::bbox::Aabb;
@@ -161,25 +164,80 @@ impl Model {
         brute: bool,
         level: Option<usize>,
     ) -> Classification {
-        // Each chunk interns its own labels; chunks are merged in parallel,
-        // with ids numbered by first occurrence in point order.
-        let scratch = || Scratch {
-            level,
-            ..Scratch::default()
-        };
-        let chunks: Vec<intern::Chunk> = points
+        if points.len() <= CHUNK {
+            let mut s = Scratch {
+                level,
+                ..Scratch::default()
+            };
+            let mut out = intern::Chunk::default();
+            out.ids.reserve(points.len());
+            for &p in points {
+                self.classify_into(p, &mut s, brute);
+                out.push(&s.key);
+            }
+            let labels = (0..out.len()).map(|i| decode(out.key(i))).collect();
+            return Classification {
+                ids: out.ids,
+                labels,
+            };
+        }
+        // Each worker reuses one per-thread table across chunks so label
+        // interning avoids chunk-sized hash tables, then renumbers ids in
+        // exact point order.
+        let threads = rayon::current_num_threads();
+        let tables: Vec<Mutex<intern::Chunk>> = (0..threads).map(|_| Mutex::default()).collect();
+        let spans: Vec<(usize, usize, usize)> = points
             .par_chunks(CHUNK)
-            .map_init(scratch, |s, chunk| {
-                let mut out = intern::Chunk::default();
-                for &p in chunk {
-                    self.classify_into(p, s, brute);
-                    out.push(&s.key);
-                }
-                out
-            })
+            .map_init(
+                || Scratch {
+                    level,
+                    ..Scratch::default()
+                },
+                |s, chunk| {
+                    let t = rayon::current_thread_index().unwrap_or(0) % threads;
+                    let mut table = {
+                        let mut guard = tables[t].lock().unwrap_or_else(|e| e.into_inner());
+                        mem::take(&mut *guard)
+                    };
+                    let start = table.ids.len();
+                    for &p in chunk {
+                        self.classify_into(p, s, brute);
+                        table.push(&s.key);
+                    }
+                    let end = table.ids.len();
+                    *tables[t].lock().unwrap_or_else(|e| e.into_inner()) = table;
+                    (t, start, end)
+                },
+            )
             .collect();
-        let (ids, keys) = intern::merge(&chunks);
-        let labels = keys.par_iter().map(|k| decode(k)).collect();
+        let tables: Vec<intern::Chunk> = tables
+            .into_iter()
+            .map(|t| t.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        let (canon, keys) = intern::merge(&tables);
+        let mut base = Vec::with_capacity(tables.len());
+        let mut at = 0;
+        for t in &tables {
+            base.push(at);
+            at += t.ids.len();
+        }
+        let mut number = vec![u32::MAX; keys.len()];
+        let mut order: Vec<u32> = Vec::with_capacity(keys.len());
+        let mut ids = Vec::with_capacity(canon.len());
+        for &(t, start, end) in &spans {
+            for &c in &canon[base[t] + start..base[t] + end] {
+                let n = &mut number[c as usize];
+                if *n == u32::MAX {
+                    *n = order.len() as u32;
+                    order.push(c);
+                }
+                ids.push(*n);
+            }
+        }
+        let labels = order
+            .par_iter()
+            .map(|&c| decode(keys[c as usize]))
+            .collect();
         Classification { ids, labels }
     }
 

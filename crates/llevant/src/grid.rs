@@ -393,28 +393,21 @@ impl Octree {
         hi: f64,
         mut f: impl FnMut(usize, &[u32], f64, f64),
     ) {
-        let inv = d.map(|x| 1.0 / x);
-        let range = |b: &Aabb| {
-            let b = b.widen();
-            let (mut a, mut z) = (lo, hi);
-            for i in 0..3 {
-                if d[i] == 0.0 {
-                    if !(o[i] >= b.lo[i] && o[i] <= b.hi[i]) {
-                        return None;
-                    }
-                    continue;
-                }
-                let (t1, t2) = ((b.lo[i] - o[i]) * inv[i], (b.hi[i] - o[i]) * inv[i]);
-                let (t1, t2) = if inv[i] < 0.0 { (t2, t1) } else { (t1, t2) };
-                a = a.max(t1);
-                z = z.min(t2);
-            }
-            (a <= z).then_some((a, z))
+        let inv = Aabb::ray_inv(d);
+        let range = |b: &Aabb| b.widen().ray_range_inv(o, d, inv, lo, hi);
+        let Some((ra, rz)) = range(&self.root) else {
+            return;
         };
-        let mut stack = vec![(0u32, self.root)];
-        while let Some((n, b)) = stack.pop() {
-            let Some((a, z)) = range(&b) else {
-                continue;
+        let mut stack = [(0u32, Aabb::EMPTY, 0.0f64, 0.0f64); 192];
+        let mut sp = 1usize;
+        stack[0] = (0, self.root, ra, rz);
+        let mut overflow: Vec<(u32, Aabb, f64, f64)> = Vec::new();
+        while sp > 0 || !overflow.is_empty() {
+            let (n, b, a, z) = if let Some(top) = overflow.pop() {
+                top
+            } else {
+                sp -= 1;
+                stack[sp]
             };
             let node = self.nodes[n as usize];
             if node.len != INNER {
@@ -427,7 +420,16 @@ impl Octree {
                 continue;
             }
             for k in 0..8 {
-                stack.push((node.first + k as u32, child_box(&b, k)));
+                let cb = child_box(&b, k);
+                if let Some((ca, cz)) = range(&cb) {
+                    let entry = (node.first + k as u32, cb, ca, cz);
+                    if sp < stack.len() {
+                        stack[sp] = entry;
+                        sp += 1;
+                    } else {
+                        overflow.push(entry);
+                    }
+                }
             }
         }
     }

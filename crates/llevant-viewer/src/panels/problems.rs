@@ -20,6 +20,48 @@ use crate::{icons, theme};
 #[derive(Default)]
 pub struct ProblemsPanel {
     pub region: RegionPicker,
+    lost_input: String,
+    lost_status: Option<String>,
+}
+
+fn parse_lost_coords(raw: &str) -> Option<[f64; 3]> {
+    let lower = raw.to_ascii_lowercase();
+    let tail = if let Some(pos) = lower.find("lost at") {
+        &raw[pos + "lost at".len()..]
+    } else if let Some(pos) = lower.find("position") {
+        &raw[pos + "position".len()..]
+    } else if let Some(pos) = raw.find('=') {
+        &raw[pos + 1..]
+    } else {
+        raw
+    };
+    let mut nums = Vec::new();
+    let mut cur = String::new();
+    for ch in tail.chars() {
+        let is_num = ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E' | 'd' | 'D');
+        if is_num {
+            cur.push(if matches!(ch, 'd' | 'D') { 'e' } else { ch });
+        } else if !cur.is_empty() {
+            if let Ok(v) = cur.parse::<f64>() {
+                if v.is_finite() {
+                    nums.push(v);
+                }
+            }
+            cur.clear();
+        }
+    }
+    if !cur.is_empty() {
+        if let Ok(v) = cur.parse::<f64>() {
+            if v.is_finite() {
+                nums.push(v);
+            }
+        }
+    }
+    if nums.len() >= 3 {
+        Some([nums[0], nums[1], nums[2]])
+    } else {
+        None
+    }
 }
 
 /// Go to a problem: frame `b` (or a box around `p`), slice through `p`,
@@ -200,6 +242,41 @@ impl ProblemsPanel {
             }
         });
 
+        // Lost-particle coordinate jump / classify.
+        theme::section(ui, icons::GO_TO, "Lost particle", |ui| {
+            ui.horizontal(|ui| {
+                let edit = egui::TextEdit::singleline(&mut self.lost_input)
+                    .hint_text("x y z or log line")
+                    .desired_width(ui.available_width() - 44.0);
+                let submit =
+                    ui.add(edit).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui
+                    .button("Go")
+                    .on_hover_text("Classify coordinate, slice through it, and frame it in 3D")
+                    .clicked()
+                    || submit
+                {
+                    if let Some(p) = parse_lost_coords(&self.lost_input) {
+                        let lbl = m.classify_point(p);
+                        self.lost_status = Some(format!(
+                            "({:.4}, {:.4}, {:.4}): {}",
+                            p[0],
+                            p[1],
+                            p[2],
+                            m.describe(&lbl)
+                        ));
+                        out.extend(go(doc, &lbl, None, p));
+                    } else {
+                        self.lost_status =
+                            Some("Enter three finite coordinates (x y z)".to_string());
+                    }
+                }
+            });
+            if let Some(msg) = &self.lost_status {
+                ui.label(theme::data(msg));
+            }
+        });
+
         // From the compiler.
         let diags = m.diagnostics();
         let title = format!(
@@ -233,5 +310,28 @@ impl ProblemsPanel {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lost_coords;
+
+    #[test]
+    fn parses_lost_particle_coordinate_formats() {
+        assert_eq!(parse_lost_coords("1.5 -2.0 3.25"), Some([1.5, -2.0, 3.25]));
+        assert_eq!(
+            parse_lost_coords("x=1.5, y=-2.0, z=3.25"),
+            Some([1.5, -2.0, 3.25])
+        );
+        assert_eq!(
+            parse_lost_coords("particle 42 lost at 1.5d0, -2.0e1, 3.25"),
+            Some([1.5, -20.0, 3.25])
+        );
+        assert_eq!(
+            parse_lost_coords("Position: (0.0, 4.5, -1.25)"),
+            Some([0.0, 4.5, -1.25])
+        );
+        assert_eq!(parse_lost_coords("only 1 2"), None);
     }
 }

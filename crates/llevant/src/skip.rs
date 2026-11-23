@@ -80,71 +80,139 @@ impl Skip {
         self.nodes[u as usize].as_deref()
     }
 
+    /// Same as [`Skip::spans`], reusing caller buffers `raw` and `out`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spans_into(
+        &self,
+        m: &Model,
+        u: u32,
+        o: crate::vec3::Vec3,
+        d: crate::vec3::Vec3,
+        range: (f64, f64),
+        pad: f64,
+        raw: &mut Vec<(f64, f64)>,
+        out: &mut Vec<(f64, f64)>,
+    ) {
+        let grid = m.units[u as usize]
+            .grid
+            .as_deref()
+            .filter(|_| self.walk[u as usize]);
+        octree_spans_into(
+            &self.boxes[u as usize],
+            grid,
+            self.nodes(u),
+            o,
+            d,
+            range,
+            pad,
+            raw,
+            out,
+        );
+    }
+
     /// The parts of `[lo, hi]` of the line `o + t·d` in unit `u` (in its
     /// frame) where a cell worth entering may be, each grown by `pad` on
     /// both sides, in order and merged: within the unit's box of such
     /// cells, less the octree nodes that hold none (leaf boxes widened as
     /// cell boxes are).
+    #[allow(dead_code)]
     pub(crate) fn spans(
         &self,
         m: &Model,
         u: u32,
         o: crate::vec3::Vec3,
         d: crate::vec3::Vec3,
-        (lo, hi): (f64, f64),
+        range: (f64, f64),
         pad: f64,
     ) -> Vec<(f64, f64)> {
-        let Some((a, b)) = self.boxes[u as usize].widen().ray_range(o, d, lo, hi) else {
-            return Vec::new();
-        };
-        let mut raw: Vec<(f64, f64)> = Vec::new();
-        match (&m.units[u as usize].grid, self.nodes(u)) {
-            (Some(g), Some(flags)) if self.walk[u as usize] => {
-                // Outside the octree's root, as it is.
-                match g.root.widen().ray_range(o, d, a, b) {
-                    None => raw.push((a, b)),
-                    Some((r0, r1)) => {
-                        if a < r0 {
-                            raw.push((a, r0));
-                        }
-                        if r1 < b {
-                            raw.push((r1, b));
-                        }
-                        let mut stack = vec![(0usize, g.root)];
-                        while let Some((n, bx)) = stack.pop() {
-                            if !flags[n] {
-                                continue;
-                            }
-                            let Some(r) = bx.widen().ray_range(o, d, r0, r1) else {
-                                continue;
+        let mut raw = Vec::new();
+        let mut out = Vec::new();
+        self.spans_into(m, u, o, d, range, pad, &mut raw, &mut out);
+        out
+    }
+}
+
+/// Compute ordered, `pad`-widened, merged `t` spans within `outer` where `nodes`
+/// indicates an octree leaf may hold something relevant.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn octree_spans_into(
+    outer: &Aabb,
+    grid: Option<&crate::grid::Octree>,
+    nodes: Option<&[bool]>,
+    o: crate::vec3::Vec3,
+    d: crate::vec3::Vec3,
+    (lo, hi): (f64, f64),
+    pad: f64,
+    raw: &mut Vec<(f64, f64)>,
+    out: &mut Vec<(f64, f64)>,
+) {
+    raw.clear();
+    out.clear();
+    let inv = Aabb::ray_inv(d);
+    let Some((a, b)) = outer.widen().ray_range_inv(o, d, inv, lo, hi) else {
+        return;
+    };
+    match (grid, nodes) {
+        (Some(g), Some(flags)) => {
+            // Outside the octree's root, keep the span unchanged.
+            match g.root.widen().ray_range_inv(o, d, inv, a, b) {
+                None => raw.push((a, b)),
+                Some((r0, r1)) => {
+                    if a < r0 {
+                        raw.push((a, r0));
+                    }
+                    if r1 < b {
+                        raw.push((r1, b));
+                    }
+                    if flags[0] {
+                        let mut stack = [(0usize, Aabb::EMPTY, 0.0f64, 0.0f64); 192];
+                        let mut sp = 1usize;
+                        stack[0] = (0, g.root, r0, r1);
+                        let mut overflow: Vec<(usize, Aabb, f64, f64)> = Vec::new();
+                        while sp > 0 || !overflow.is_empty() {
+                            let (n, bx, ra, rb) = if let Some(top) = overflow.pop() {
+                                top
+                            } else {
+                                sp -= 1;
+                                stack[sp]
                             };
                             let node = g.nodes[n];
                             if node.len != INNER {
-                                raw.push(r);
+                                raw.push((ra, rb));
                                 continue;
                             }
                             for k in 0..8 {
-                                stack.push((
-                                    node.first as usize + k,
-                                    crate::grid::child_box(&bx, k),
-                                ));
+                                let child = node.first as usize + k;
+                                if !flags[child] {
+                                    continue;
+                                }
+                                let cb = crate::grid::child_box(&bx, k);
+                                if let Some((ca, cb_t)) =
+                                    cb.widen().ray_range_inv(o, d, inv, r0, r1)
+                                {
+                                    let entry = (child, cb, ca, cb_t);
+                                    if sp < stack.len() {
+                                        stack[sp] = entry;
+                                        sp += 1;
+                                    } else {
+                                        overflow.push(entry);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            _ => raw.push((a, b)),
         }
-        raw.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let mut out: Vec<(f64, f64)> = Vec::with_capacity(raw.len());
-        for (s, e) in raw {
-            let (s, e) = ((s - pad).max(lo), (e + pad).min(hi));
-            match out.last_mut() {
-                Some(last) if s <= last.1 => last.1 = last.1.max(e),
-                _ => out.push((s, e)),
-            }
+        _ => raw.push((a, b)),
+    }
+    raw.sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
+    for &(s, e) in raw.iter() {
+        let (s, e) = ((s - pad).max(lo), (e + pad).min(hi));
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
         }
-        out
     }
 }
 

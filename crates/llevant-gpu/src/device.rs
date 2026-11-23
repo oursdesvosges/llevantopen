@@ -68,7 +68,7 @@ impl Gpu {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("llevant"),
             required_limits: adapter.limits(),
-            required_features: adapter.features() & features,
+            required_features: adapter.features() & (features | wgpu::Features::PIPELINE_CACHE),
             ..Default::default()
         }))
         .map_err(|e| Error::Gpu(format!("cannot open {}: {e}", info.name)))?;
@@ -177,4 +177,137 @@ pub(crate) fn read_mapped(gpu: &Gpu, readback: &wgpu::Buffer) -> Result<Vec<u32>
     };
     readback.unmap();
     Ok(words)
+}
+
+fn pipeline_cache_dir_from(
+    llevant_cache_dir: Option<&str>,
+    xdg_cache_home: Option<&str>,
+    home: Option<&str>,
+    local_app_data: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(dir) = llevant_cache_dir {
+        let trimmed = dir.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") || trimmed == "0" {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(trimmed).join("pipelines"));
+    }
+    if let Some(xdg) = xdg_cache_home.filter(|s| !s.trim().is_empty()) {
+        return Some(
+            std::path::PathBuf::from(xdg)
+                .join("llevant")
+                .join("pipelines"),
+        );
+    }
+    if let Some(h) = home.filter(|s| !s.trim().is_empty()) {
+        return Some(
+            std::path::PathBuf::from(h)
+                .join(".cache")
+                .join("llevant")
+                .join("pipelines"),
+        );
+    }
+    local_app_data.filter(|s| !s.trim().is_empty()).map(|p| {
+        std::path::PathBuf::from(p)
+            .join("llevant")
+            .join("pipelines")
+    })
+}
+
+pub(crate) fn pipeline_cache_path(
+    info: &wgpu::AdapterInfo,
+    shader_id: u64,
+) -> Option<std::path::PathBuf> {
+    let key = wgpu::util::pipeline_cache_key(info)?;
+    let dir = pipeline_cache_dir_from(
+        std::env::var("LLEVANT_CACHE_DIR").ok().as_deref(),
+        std::env::var("XDG_CACHE_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+    )?;
+    let safe_key: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(dir.join(format!("{safe_key}_{shader_id:016x}.bin")))
+}
+
+pub(crate) fn load_pipeline_cache(
+    gpu: &Gpu,
+    shader_id: u64,
+) -> Option<(wgpu::PipelineCache, std::path::PathBuf)> {
+    if !gpu
+        .device
+        .features()
+        .contains(wgpu::Features::PIPELINE_CACHE)
+    {
+        return None;
+    }
+    let path = pipeline_cache_path(&gpu.info, shader_id)?;
+    let data = std::fs::read(&path).ok();
+    // SAFETY: `fallback: true` allows wgpu to ignore stale or mismatched bytes cleanly.
+    let cache = unsafe {
+        gpu.device
+            .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("llevant-pipeline-cache"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+    };
+    Some((cache, path))
+}
+
+pub(crate) fn save_pipeline_cache(cache: &wgpu::PipelineCache, path: &std::path::Path) {
+    let Some(bytes) = cache.get_data() else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, &bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_pipeline_cache_dir_precedence() {
+        assert_eq!(
+            pipeline_cache_dir_from(Some("off"), Some("/xdg"), Some("/h"), None),
+            None
+        );
+        assert_eq!(
+            pipeline_cache_dir_from(Some("0"), Some("/xdg"), Some("/h"), None),
+            None
+        );
+        assert_eq!(
+            pipeline_cache_dir_from(Some("/custom/cache"), Some("/xdg"), Some("/h"), None),
+            Some(std::path::PathBuf::from("/custom/cache/pipelines"))
+        );
+        assert_eq!(
+            pipeline_cache_dir_from(None, Some("/xdg"), Some("/h"), None),
+            Some(std::path::PathBuf::from("/xdg/llevant/pipelines"))
+        );
+        assert_eq!(
+            pipeline_cache_dir_from(None, None, Some("/home/u"), None),
+            Some(std::path::PathBuf::from("/home/u/.cache/llevant/pipelines"))
+        );
+    }
 }

@@ -316,6 +316,7 @@ pub(super) fn union_pieces(
     out: &mut Vec<Line>,
 ) {
     let s = grid.spacing();
+    let inv = Aabb::ray_inv(l.dir);
     let point = |ka: i64, kb: i64| {
         add(
             scale(l.a, l.offset[0] + ka as f64 * s),
@@ -329,7 +330,8 @@ pub(super) fn union_pieces(
         let o = grid.lattice_over(l, b);
         for ka in o.ka.0.max(rows.0)..o.ka.1.min(rows.1) {
             for kb in o.kb.0..o.kb.1 {
-                let range = b.ray_range(point(ka, kb), l.dir, f64::NEG_INFINITY, f64::INFINITY);
+                let range =
+                    b.ray_range_inv(point(ka, kb), l.dir, inv, f64::NEG_INFINITY, f64::INFINITY);
                 if let Some((t0, t1)) = range.filter(|(t0, t1)| t1 > t0) {
                     spans.push((ka, kb, t0, t1));
                 }

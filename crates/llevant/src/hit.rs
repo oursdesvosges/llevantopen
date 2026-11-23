@@ -324,6 +324,12 @@ impl Model {
         let skip = skip.filter(|_| !vis.gaps && !vis.problems);
         vis.check(self.cells.len())?;
         crate::trace::check_lines(rays)?;
+        let exact_nodes = if skip.is_none() && rays.len() >= 64 {
+            self.exact_first_hit_nodes(vis)
+        } else {
+            None
+        };
+        let exact_ref = exact_nodes.as_deref();
         let ghosts = vis.has_ghosts();
         let parts: Vec<Part> = rays
             .par_chunks(crate::trace::chunk_len(rays.len()))
@@ -334,6 +340,7 @@ impl Model {
                     tr.hit = Some(crate::trace::HitSearch {
                         vis,
                         skip,
+                        exact_nodes: exact_ref,
                         found: None,
                         ghosts: ghosts.then(Vec::new),
                         veils: Default::default(),
@@ -391,5 +398,119 @@ impl Model {
             .collect();
         out.labels = keys.par_iter().map(|k| decode(k)).collect();
         Ok(out)
+    }
+
+    /// Marks which octree nodes of unit 0 can contain anything observable even
+    /// when `vis.gaps` / `vis.problems` are enabled: a leaf whose sole cell has
+    /// residual `PROG_TRUE`, is hidden (`!vis.cells[c] && !vis.is_ghost(c)`),
+    /// unfilled, supported, and disjoint from every `u0.always` cell cannot
+    /// hold any hit, ghost boundary, gap, or problem.
+    fn exact_first_hit_nodes(&self, vis: &Visibility) -> Option<Vec<bool>> {
+        let u0 = &self.units[0];
+        let g = u0.grid.as_ref()?;
+        if g.progs.is_empty() || u0.always.len() > 8 {
+            return None;
+        }
+        for &a in &u0.always {
+            let ca = &self.cells[a as usize];
+            if ca.unsupported.is_some() {
+                return None;
+            }
+        }
+
+        let tol = self.tolerance;
+        let leaf_interesting = |n: usize, bx: &crate::bbox::Aabb| -> bool {
+            let node = g.nodes[n];
+            if node.len != 1 {
+                return true;
+            }
+            let first = node.first as usize;
+            if g.progs.get(first) != Some(&crate::grid::PROG_TRUE) {
+                return true;
+            }
+            let c = g.items[first];
+            let cell = &self.cells[c as usize];
+            if vis.cells[c as usize]
+                || vis.is_ghost(c)
+                || cell.fill.is_some()
+                || cell.unsupported.is_some()
+            {
+                return true;
+            }
+            for &a in &u0.always {
+                let v = crate::expr::eval_box(
+                    self.code(a),
+                    bx,
+                    self.node_boxes_of(a),
+                    &mut |s, want_pos| match (self.shapes[s as usize].side_over(bx, tol), want_pos)
+                    {
+                        (crate::surface::Side::On, _) => crate::expr::Tri::Unknown,
+                        (crate::surface::Side::Pos, true) | (crate::surface::Side::Neg, false) => {
+                            crate::expr::Tri::True
+                        }
+                        _ => crate::expr::Tri::False,
+                    },
+                );
+                if v != crate::expr::Tri::False {
+                    return true;
+                }
+            }
+            false
+        };
+
+        let mut flags = vec![true; g.nodes.len()];
+        let mut n_leaves = 0usize;
+        let mut n_interesting = 0usize;
+        fn walk(
+            g: &crate::grid::Octree,
+            n: usize,
+            bx: crate::bbox::Aabb,
+            flags: &mut [bool],
+            n_leaves: &mut usize,
+            n_interesting: &mut usize,
+            leaf_interesting: &impl Fn(usize, &crate::bbox::Aabb) -> bool,
+        ) -> bool {
+            let node = g.nodes[n];
+            if node.len != crate::grid::INNER {
+                *n_leaves += 1;
+                let keep = leaf_interesting(n, &bx);
+                flags[n] = keep;
+                if keep {
+                    *n_interesting += 1;
+                }
+                return keep;
+            }
+            let mut any = false;
+            for k in 0..8 {
+                let child = node.first as usize + k;
+                let cb = crate::grid::child_box(&bx, k);
+                if walk(
+                    g,
+                    child,
+                    cb,
+                    flags,
+                    n_leaves,
+                    n_interesting,
+                    leaf_interesting,
+                ) {
+                    any = true;
+                }
+            }
+            flags[n] = any;
+            any
+        }
+        walk(
+            g,
+            0,
+            g.root,
+            &mut flags,
+            &mut n_leaves,
+            &mut n_interesting,
+            &leaf_interesting,
+        );
+        if n_leaves == 0 || (n_interesting as f64) > 0.75 * (n_leaves as f64) {
+            return None;
+        }
+        Some(flags)
     }
 }

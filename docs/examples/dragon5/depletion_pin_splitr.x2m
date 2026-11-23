@@ -1,0 +1,21 @@
+* ------------------------------------------------------------
+* DRAGON5 depletion pin with equal-area radial rings (SPLITR)
+* and axial sub-meshing (SPLITZ)
+* ------------------------------------------------------------
+LINKED_LIST PIN ;
+MODULE GEO: ;
+
+PIN := GEO: :: CARCEL 2
+  X- REFL X+ REFL
+  Y- REFL Y+ REFL
+  Z- VOID Z+ VOID
+  MESHX 0.0 1.26
+  MESHY 0.0 1.26
+  MESHZ 0.0 10.0
+  RADIUS 0.0 0.4096 0.4750
+  SPLITR 3 1
+  SPLITZ 2
+  MIX
+    1 2 3 4 5
+    1 2 3 4 5
+;

@@ -535,6 +535,7 @@ impl GpuModel {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
+        let cache_entry = load_pipeline_cache(gpu, shader_id);
         let pipeline = |entry: &str, constants: &[(&str, f64)]| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -545,7 +546,7 @@ impl GpuModel {
                     constants,
                     ..Default::default()
                 },
-                cache: None,
+                cache: cache_entry.as_ref().map(|(c, _)| c),
             })
         };
         let trace_rays = pipeline("trace_rays", &[]);
@@ -555,6 +556,9 @@ impl GpuModel {
             return Err(Error::Gpu(format!(
                 "the GPU cannot compile the renderer: {e}"
             )));
+        }
+        if let Some((cache, path)) = &cache_entry {
+            save_pipeline_cache(cache, path);
         }
         Ok(GpuModel {
             n_cells: e.cells.len(),
@@ -583,6 +587,7 @@ impl GpuModel {
             module,
             shader_id,
             pipeline_layout,
+            pipeline_cache: cache_entry,
             bytes,
             eps_abs: 1e-4,
             eps_rel: 1e-6,
@@ -606,6 +611,7 @@ impl GpuModel {
     /// tuning in one process (`gpu_ab`).
     #[doc(hidden)]
     pub fn set_constants(&mut self, gpu: &Gpu, constants: &[(&str, f64)]) {
+        let cache = self.pipeline_cache.as_ref().map(|(c, _)| c);
         let pipeline = |entry: &str, extra: &[(&str, f64)]| {
             let all: Vec<(&str, f64)> = constants.iter().chain(extra).copied().collect();
             gpu.device
@@ -618,12 +624,15 @@ impl GpuModel {
                         constants: &all,
                         ..Default::default()
                     },
-                    cache: None,
+                    cache,
                 })
         };
         self.trace_rays = pipeline("trace_rays", &[]);
         self.render = pipeline("render", &[]);
         self.stats = pipeline("render", &[("STATS", 1.0)]).into();
+        if let Some((c, path)) = &self.pipeline_cache {
+            save_pipeline_cache(c, path);
+        }
     }
 
     /// A diagnostic variant of entry point `entry` with `constants`,
@@ -634,7 +643,9 @@ impl GpuModel {
         entry: &str,
         constants: &[(&str, f64)],
     ) -> wgpu::ComputePipeline {
-        gpu.device
+        let cache = self.pipeline_cache.as_ref().map(|(c, _)| c);
+        let pipe = gpu
+            .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&self.pipeline_layout),
@@ -644,8 +655,12 @@ impl GpuModel {
                     constants,
                     ..Default::default()
                 },
-                cache: None,
-            })
+                cache,
+            });
+        if let Some((c, path)) = &self.pipeline_cache {
+            save_pipeline_cache(c, path);
+        }
+        pipe
     }
 }
 

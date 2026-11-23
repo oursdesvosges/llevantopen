@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
+use crate::bbox::Aabb;
 use crate::classify::{decode, Depth, Label, Status, MAX_DEPTH};
 use crate::error::{Error, Result};
 use crate::expr::{self, Tri};
@@ -628,6 +629,7 @@ struct Level {
     set: Vec<u32>,
     pieces: Vec<Piece>,
     piece_cells: Vec<u32>,
+    reps: Vec<(f64, u32)>,
     breaks: Vec<(f64, u32)>,
     elements: Vec<(f64, f64, u32, u32, [i32; 3])>,
 }
@@ -636,6 +638,8 @@ pub(crate) struct Tracer<'m> {
     m: &'m Model,
     brute: bool,
     levels: Vec<Level>,
+    spans: Vec<(f64, f64)>,
+    skip_raw: Vec<(f64, f64)>,
     /// Sparse-set index into a level's `cache` by surface. `slot[s]` is
     /// only trusted when that level's entry there names `s`, so the array
     /// never needs clearing and all levels can share it: an index left by
@@ -664,6 +668,10 @@ pub(crate) struct HitSearch<'v> {
     /// Where something visible may be, when `vis` shows no gaps and no
     /// problems (so that skipping the rest is exact).
     pub skip: Option<&'v crate::skip::Skip>,
+    /// Per-node flags of unit 0's octree even when gaps/problems are shown:
+    /// leaves known to be strictly filled by a single hidden, non-ghost,
+    /// unfilled cell with no possible overlap from `always` are false.
+    pub exact_nodes: Option<&'v [bool]>,
     pub found: Option<FoundHit>,
     /// The stretches in ghost cells met so far, when there are ghosts.
     pub ghosts: Option<Vec<GhostStretch>>,
@@ -723,6 +731,8 @@ impl<'m> Tracer<'m> {
             m,
             brute,
             levels: Vec::new(),
+            spans: Vec::new(),
+            skip_raw: Vec::new(),
             slot: Vec::new(),
             path: Vec::new(),
             segs: Vec::new(),
@@ -758,23 +768,87 @@ impl<'m> Tracer<'m> {
         }
         // Only where something visible may be, in order (all of the line
         // without a skip).
-        let spans = match self.hit.as_ref().and_then(|h| h.skip) {
-            Some(s) => s.spans(self.m, 0, l.origin, l.dir, (l.t_min, l.t_max), SPAN_PAD),
-            None => vec![(l.t_min, l.t_max)],
-        };
-        for (t0, t1) in spans {
+        let mut spans = mem::take(&mut self.spans);
+        spans.clear();
+        if let Some(s) = self.hit.as_ref().and_then(|h| h.skip) {
+            let mut raw = mem::take(&mut self.skip_raw);
+            s.spans_into(
+                self.m,
+                0,
+                l.origin,
+                l.dir,
+                (l.t_min, l.t_max),
+                SPAN_PAD,
+                &mut raw,
+                &mut spans,
+            );
+            self.skip_raw = raw;
+        } else if let (Some(flags), Some(g)) = (
+            self.hit.as_ref().and_then(|h| h.exact_nodes),
+            self.m.units[0].grid.as_deref(),
+        ) {
+            let mut raw = mem::take(&mut self.skip_raw);
+            crate::skip::octree_spans_into(
+                &self.m.units[0].roi,
+                Some(g),
+                Some(flags),
+                l.origin,
+                l.dir,
+                (l.t_min, l.t_max),
+                SPAN_PAD,
+                &mut raw,
+                &mut spans,
+            );
+            // Outside `u0.roi`, retain any segments before `roi` and after `roi`
+            // so gaps/problems outside `u0.roi` are still checked by `u0.outside()`.
+            let inv = Aabb::ray_inv(l.dir);
+            match self.m.units[0]
+                .roi
+                .widen()
+                .ray_range_inv(l.origin, l.dir, inv, l.t_min, l.t_max)
+            {
+                None => {
+                    spans.clear();
+                    spans.push((l.t_min, l.t_max));
+                }
+                Some((ra, rb)) => {
+                    if ra > l.t_min {
+                        let tail = (ra + SPAN_PAD).min(l.t_max);
+                        if spans.first().is_some_and(|s| s.0 <= tail) {
+                            spans[0].0 = l.t_min;
+                        } else {
+                            spans.insert(0, (l.t_min, tail));
+                        }
+                    }
+                    if rb < l.t_max {
+                        let head = (rb - SPAN_PAD).max(l.t_min);
+                        if spans.last().is_some_and(|s| s.1 >= head) {
+                            spans.last_mut().unwrap().1 = l.t_max;
+                        } else {
+                            spans.push((head, l.t_max));
+                        }
+                    }
+                }
+            }
+            self.skip_raw = raw;
+        } else {
+            spans.push((l.t_min, l.t_max));
+        }
+        let span_start = spans.first().map_or(l.t_min, |s| s.0);
+        for &(t0, t1) in &spans {
             // Growing windows from the start, so that a hit near it does
             // not pay for the rest of the line. Anything visible in an
             // earlier window would have been found there. A later span goes
             // on with windows as large as they would have grown to by then:
             // restarting small ones in the middle of a model costs more.
-            let (mut ta, mut w) = (t0, HIT_WINDOW.max(t0 - l.t_min));
+            let (mut ta, mut w) = (t0, HIT_WINDOW.max(t0 - span_start));
             loop {
                 let tb = if t1 - ta <= 2.0 * w { t1 } else { ta + w };
                 self.unit(
                     0, l.origin, l.dir, ta, tb, NO_SURFACE, NO_SURFACE, 0, IDENTITY,
                 );
                 if self.done() {
+                    self.spans = spans;
                     return self.hit.as_mut().and_then(|h| h.found.take());
                 }
                 self.keys.clear();
@@ -785,6 +859,7 @@ impl<'m> Tracer<'m> {
                 (ta, w) = (tb, 2.0 * w);
             }
         }
+        self.spans = spans;
         None
     }
 
@@ -1283,6 +1358,7 @@ impl<'m> Tracer<'m> {
         // stretch lies in it, nodes it misses are constant along it and
         // their leaves cannot matter.
         let (pa, pb) = (at(o, d, lo), at(o, d, hi));
+        let inv = Aabb::ray_inv(d);
         let prune = !self.brute && u.roi.contains(pa) && u.roi.contains(pb);
         let mut leaves = std::mem::take(&mut lv.leaves);
         leaves.clear();
@@ -1291,7 +1367,7 @@ impl<'m> Tracer<'m> {
                 expr::leaves_where(
                     code,
                     m.node_boxes_of(c),
-                    &mut |b| b.ray_range(o, d, lo, hi).is_some(),
+                    &mut |b| b.ray_range_inv(o, d, inv, lo, hi).is_some(),
                     &mut |s| leaves.push(s),
                 );
             } else {
@@ -1320,8 +1396,21 @@ impl<'m> Tracer<'m> {
                     *crossed += 1;
                     lv.tmp.clear();
                     m.shapes[s as usize].crossings(o, d, ta, tb, &mut lv.tmp);
-                    lv.tmp.sort_by(f64::total_cmp);
-                    lv.tmp.dedup();
+                    match lv.tmp.len() {
+                        0 | 1 => {}
+                        2 => {
+                            if lv.tmp[0].total_cmp(&lv.tmp[1]).is_gt() {
+                                lv.tmp.swap(0, 1);
+                            }
+                            if lv.tmp[0] == lv.tmp[1] {
+                                lv.tmp.pop();
+                            }
+                        }
+                        _ => {
+                            lv.tmp.sort_unstable_by(f64::total_cmp);
+                            lv.tmp.dedup();
+                        }
+                    }
                     let r = (lv.roots.len() as u32, lv.tmp.len() as u32);
                     lv.roots.extend_from_slice(&lv.tmp);
                     slot[s as usize] = lv.cache.len() as u32;
@@ -1340,7 +1429,7 @@ impl<'m> Tracer<'m> {
         }
         lv.leaves = leaves;
         // Coincident crossings: the lowest surface, whatever the leaf order.
-        lv.cross.sort_by(|a, b| {
+        lv.cross.sort_unstable_by(|a, b| {
             a.0.total_cmp(&b.0)
                 .then(surface_of(a.1).cmp(&surface_of(b.1)))
         });
@@ -1351,6 +1440,7 @@ impl<'m> Tracer<'m> {
     fn candidates(&self, lv: &mut Level, unit: u32, o: Vec3, d: Vec3, ta: f64, tb: f64) {
         let m = self.m;
         let u = &m.units[unit as usize];
+        let inv = Aabb::ray_inv(d);
         let cands = &mut lv.cands;
         cands.clear();
         lv.items.clear();
@@ -1363,7 +1453,7 @@ impl<'m> Tracer<'m> {
         let outside = |a: f64, b: f64, cands: &mut Vec<(u32, f64, f64)>| {
             cands.extend(u.outside().iter().map(|&c| (c, a, b)));
         };
-        let Some((ra, rb)) = u.roi.ray_range(o, d, ta, tb) else {
+        let Some((ra, rb)) = u.roi.ray_range_inv(o, d, inv, ta, tb) else {
             outside(ta, tb, cands);
             return;
         };
@@ -1384,7 +1474,7 @@ impl<'m> Tracer<'m> {
         match u
             .grid
             .as_ref()
-            .and_then(|g| g.root.ray_range(o, d, ra, rb).map(|r| (g, r)))
+            .and_then(|g| g.root.ray_range_inv(o, d, inv, ra, rb).map(|r| (g, r)))
         {
             Some((g, (ga, gb))) => {
                 if ga > ra {
@@ -1410,7 +1500,7 @@ impl<'m> Tracer<'m> {
                 hull_per_cell(tmp);
                 lv.full.extend(cands.iter().map(|e| e.0));
                 cands.extend(tmp.iter().filter_map(|&(c, a, b)| {
-                    let (x, y) = m.cells[c as usize].bbox.ray_range(o, d, a, b)?;
+                    let (x, y) = m.cells[c as usize].bbox.ray_range_inv(o, d, inv, a, b)?;
                     Some((c, x, y))
                 }));
                 lv.items.sort_unstable();
@@ -1467,8 +1557,11 @@ fn snap(lv: &mut Level, ta: f64, tb: f64, sa: u32, sb: u32, tol: f64) {
         lv.ends.push((r.t0, r.s0, false));
         lv.ends.push((r.t1, r.s1, false));
     }
-    lv.ends
-        .sort_by(|a, b| a.0.total_cmp(&b.0).then(b.2.cmp(&a.2)));
+    lv.ends.sort_unstable_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(b.2.cmp(&a.2))
+            .then(surface_of(a.1).cmp(&surface_of(b.1)))
+    });
     lv.clusters.clear();
     let snapping = tb - ta > tol;
     let mut i = 0;
@@ -1517,16 +1610,15 @@ fn sweep(lv: &mut Level) {
     lv.pieces.clear();
     lv.piece_cells.clear();
     lv.runs
-        .sort_by(|a, b| a.t0.total_cmp(&b.t0).then(a.cell.cmp(&b.cell)));
+        .sort_unstable_by(|a, b| a.t0.total_cmp(&b.t0).then(a.cell.cmp(&b.cell)));
     lv.active.clear();
     let mut next = 0;
-    let reps: Vec<(f64, u32)> = {
-        let mut v: Vec<(f64, u32)> = lv.clusters.iter().map(|c| (c.rep, c.surface)).collect();
-        v.dedup_by(|b, a| a.0 == b.0);
-        v
-    };
-    for w in reps.windows(2) {
-        let ((x, sx), (y, sy)) = (w[0], w[1]);
+    lv.reps.clear();
+    lv.reps
+        .extend(lv.clusters.iter().map(|c| (c.rep, c.surface)));
+    lv.reps.dedup_by(|b, a| a.0 == b.0);
+    for i in 0..lv.reps.len().saturating_sub(1) {
+        let ((x, sx), (y, sy)) = (lv.reps[i], lv.reps[i + 1]);
         if !(y > x) {
             continue;
         }
@@ -1612,11 +1704,15 @@ fn lattice_pieces(
 ) {
     breaks.clear();
     breaks.push((s0, sa));
+    let ray = lat.prepare_ray(d);
     let mut t = s0;
     let mut ix = lat.index(at(o, d, t));
+    let mut cached: Option<(f64, f64, Option<usize>)> = None;
     let mut step = LATTICE_STEP;
     while t < s1 {
-        let (lo, hi, exit) = lat.element_range(o, d, ix);
+        let (lo, hi, exit) = cached
+            .take()
+            .unwrap_or_else(|| lat.element_range_ray(o, &ray, ix));
         if lo <= t + step && hi > t + step {
             if hi >= s1 {
                 break;
@@ -1629,13 +1725,21 @@ fn lattice_pieces(
                 ));
             }
             (t, step) = (hi, LATTICE_STEP);
+            if let Some(face) = exit {
+                let nb = lat.step_across(ix, face);
+                let r = lat.element_range_ray(o, &ray, nb);
+                if r.0 < t + step && r.1 > t + step {
+                    ix = nb;
+                    cached = Some(r);
+                }
+            }
             continue;
         }
         // The element the line enters next: of the neighbours holding it
         // just past `t`, the one it leaves first.
         let mut best: Option<(f64, [i32; 3])> = None;
         for nb in lat.neighbours(ix) {
-            let (l, h, _) = lat.element_range(o, d, nb);
+            let (l, h, _) = lat.element_range_ray(o, &ray, nb);
             if l <= t + step && h > t + step && best.is_none_or(|b| h < b.0) {
                 best = Some((h, nb));
             }

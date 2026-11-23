@@ -45,31 +45,66 @@ pub fn is_tripoli_path(path: &Path) -> bool {
         })
 }
 
+fn utf8_prefix(input: &[u8], max_bytes: usize) -> &str {
+    let slice = &input[..input.len().min(max_bytes)];
+    match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&slice[..e.valid_up_to()]).unwrap_or(""),
+    }
+}
+
 /// Returns `true` if raw input bytes appear to be a TRIPOLI-4 deck.
 pub fn is_tripoli_bytes(input: &[u8]) -> bool {
-    let Ok(s) = std::str::from_utf8(input) else {
-        return false;
-    };
-    let clean = strip_block_comments_fast(s);
+    let prefix = utf8_prefix(input, 65_536);
     let mut has_geom = false;
     let mut has_t4_kw = false;
-    for raw_line in clean.lines() {
-        let code = raw_line.split("//").next().unwrap_or("").trim();
+    let mut in_block = false;
+    for raw_line in prefix.lines() {
+        let mut s = raw_line;
+        loop {
+            if in_block {
+                if let Some(end) = s.find("*/") {
+                    s = &s[end + 2..];
+                    in_block = false;
+                } else {
+                    s = "";
+                    break;
+                }
+            }
+            if let Some(start) = s.find("/*") {
+                let before = &s[..start];
+                let after = &s[start + 2..];
+                if !before.trim().is_empty() {
+                    s = before;
+                    if after.find("*/").is_none() {
+                        in_block = true;
+                    }
+                    break;
+                }
+                if let Some(end) = after.find("*/") {
+                    s = &after[end + 2..];
+                } else {
+                    in_block = true;
+                    s = "";
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        let code = s.split("//").next().unwrap_or("").trim();
         if code.is_empty() {
             continue;
         }
-        let first = code
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        if matches!(first.as_str(), "GEOMETRY" | "GEOMETRIE") {
+        let first = code.split_whitespace().next().unwrap_or("");
+        if first.eq_ignore_ascii_case("GEOMETRY") || first.eq_ignore_ascii_case("GEOMETRIE") {
             has_geom = true;
-        }
-        if matches!(
-            first.as_str(),
-            "SURF" | "VOLU" | "ENDG" | "END_GEOMETRY" | "GEOMCOMP"
-        ) {
+        } else if first.eq_ignore_ascii_case("SURF")
+            || first.eq_ignore_ascii_case("VOLU")
+            || first.eq_ignore_ascii_case("ENDG")
+            || first.eq_ignore_ascii_case("END_GEOMETRY")
+            || first.eq_ignore_ascii_case("GEOMCOMP")
+        {
             has_t4_kw = true;
         }
         if has_geom && has_t4_kw {
@@ -803,7 +838,7 @@ pub fn tripoli_to_mcnp(src: &str) -> Result<String, TripoliError> {
     let mut surfaces: BTreeMap<i64, T4Surface> = BTreeMap::new();
     let mut shapes: BTreeMap<i64, T4ShapeDef> = BTreeMap::new();
     let mut volumes: BTreeMap<i64, T4Volume> = BTreeMap::new();
-    let mut boundary_surfs: Vec<i64> = Vec::new();
+    let mut boundary_surfs: Vec<(i64, String)> = Vec::new();
     let mut materials: Vec<T4Material> = Vec::new();
     let mut mat_name_to_id: HashMap<String, i64> = HashMap::new();
     let mut geomcomp: HashMap<i64, (i64, f64, Option<String>)> = HashMap::new();
@@ -1191,23 +1226,22 @@ pub fn tripoli_to_mcnp(src: &str) -> Result<String, TripoliError> {
             }
             "BOUNDARY_CONDITION" | "LIMITE" => {
                 i += 1;
-                if toks.get(i).and_then(|t| parse_i64_tok(t)).is_some()
-                    && toks.get(i + 1).is_some_and(|n| {
-                        matches!(
-                            n.to_ascii_uppercase().as_str(),
-                            "ALL_COMPLETE"
-                                | "REFLECTION"
-                                | "REFLEXION"
-                                | "COSINUS"
-                                | "FUITE"
-                                | "VACUUM"
-                                | "VOID"
-                                | "ALBEDO"
-                        )
-                    })
-                {
-                    i += 1;
-                }
+                let mut cond_kind = "BOUNDARY".to_string();
+                let is_cond = |s: &str| {
+                    matches!(
+                        s,
+                        "ALL_COMPLETE"
+                            | "REFLECTION"
+                            | "REFLEXION"
+                            | "COSINUS"
+                            | "FUITE"
+                            | "VACUUM"
+                            | "VOID"
+                            | "ALBEDO"
+                            | "PERIODIC"
+                            | "ABSORPTION"
+                    )
+                };
                 while i < toks.len() {
                     let sub = toks[i].to_ascii_uppercase();
                     if matches!(
@@ -1220,8 +1254,16 @@ pub fn tripoli_to_mcnp(src: &str) -> Result<String, TripoliError> {
                     if matches!(sub.as_str(), "COMPOSITION" | "GEOMCOMP" | "GEOMETRY") {
                         break;
                     }
-                    if let Some(sid) = parse_i64_tok(&toks[i]) {
-                        boundary_surfs.push(sid);
+                    if is_cond(&sub) {
+                        cond_kind = sub;
+                    } else if parse_i64_tok(&toks[i]).is_some()
+                        && toks
+                            .get(i + 1)
+                            .is_some_and(|n| is_cond(&n.to_ascii_uppercase()))
+                    {
+                        // Leading surface count before a boundary keyword (e.g. `2 REFLECTION 1 2`).
+                    } else if let Some(sid) = parse_i64_tok(&toks[i]) {
+                        boundary_surfs.push((sid, cond_kind.clone()));
                     }
                     i += 1;
                 }
@@ -1536,13 +1578,38 @@ pub fn tripoli_to_mcnp(src: &str) -> Result<String, TripoliError> {
         }
     }
 
-    let _ = &boundary_surfs;
+    // Build boundary condition lookup per surface ID and emit diagnostics.
+    let mut boundary_by_surf: HashMap<i64, String> = HashMap::new();
+    let mut missing_boundary_surfs: Vec<(i64, String)> = Vec::new();
+    for (sid, kind) in &boundary_surfs {
+        boundary_by_surf.insert(*sid, kind.clone());
+        if !surfaces.contains_key(sid) {
+            missing_boundary_surfs.push((*sid, kind.clone()));
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Emit MCNP Input
     // -----------------------------------------------------------------------
     let mut mcnp = String::with_capacity(4096);
     let _ = writeln!(mcnp, "{title}");
+    if !boundary_surfs.is_empty() {
+        let mut items: Vec<String> = Vec::with_capacity(boundary_surfs.len());
+        for (sid, kind) in &boundary_surfs {
+            items.push(format!("{sid}={kind}"));
+        }
+        let _ = writeln!(
+            mcnp,
+            "c TRIPOLI-4 boundary conditions: {}",
+            items.join(", ")
+        );
+    }
+    for (sid, kind) in &missing_boundary_surfs {
+        let _ = writeln!(
+            mcnp,
+            "c WARNING: boundary condition `{kind}` references undefined surface {sid}"
+        );
+    }
 
     // Block 1: Cells
     let mut max_cell_id = 0i64;
@@ -1631,7 +1698,14 @@ pub fn tripoli_to_mcnp(src: &str) -> Result<String, TripoliError> {
         for c in params {
             stoks.push(fmt_num(c));
         }
-        write_wrapped_mcnp_card(&mut mcnp, &stoks, surf.comment.as_deref());
+        let surf_comment: Option<String> =
+            match (surf.comment.as_deref(), boundary_by_surf.get(&surf.id)) {
+                (Some(sc), Some(bk)) => Some(format!("{sc} boundary={bk}")),
+                (Some(sc), None) => Some(sc.to_string()),
+                (None, Some(bk)) => Some(format!("boundary={bk}")),
+                (None, None) => None,
+            };
+        write_wrapped_mcnp_card(&mut mcnp, &stoks, surf_comment.as_deref());
     }
     for (sid, mnem, params) in &extra_surfaces {
         let mut stoks = vec![sid.to_string(), mnem.clone()];
@@ -1727,5 +1801,29 @@ ENDG
         // VOLU 1 is FICTIVE so excluded as physical cell, while VOLU 3 expanded it via INTE & subtracted VOLU 2 via ECRASE
         assert!(!mcnp.contains("\n1 0 "), "{mcnp}");
         assert!(mcnp.contains("3 0 (1 -4) #(-6) imp:n=1"), "{mcnp}");
+    }
+
+    #[test]
+    fn preserves_boundary_conditions_as_diagnostics_and_comments() {
+        let t4 = r#"
+GEOMETRY
+  SURF 1 PLANEX -5.0
+  SURF 2 PLANEX 5.0
+  SURF 3 SPHERE 0.0 0.0 0.0 10.0
+  VOLU 1 EQUA PLUS 1 1 MINUS 1 2 MINUS 1 3 FINV
+ENDG
+BOUNDARY_CONDITION
+  2 REFLECTION 1 2
+  1 VACUUM 3
+END_BOUNDARY_CONDITION
+END
+"#;
+        let mcnp = tripoli_to_mcnp(t4).expect("translate T4 with boundaries");
+        assert!(
+            mcnp.contains("c TRIPOLI-4 boundary conditions: 1=REFLECTION, 2=REFLECTION, 3=VACUUM"),
+            "{mcnp}"
+        );
+        assert!(mcnp.contains("$ boundary=REFLECTION"), "{mcnp}");
+        assert!(mcnp.contains("$ boundary=VACUUM"), "{mcnp}");
     }
 }

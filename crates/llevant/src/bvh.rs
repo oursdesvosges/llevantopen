@@ -149,25 +149,45 @@ impl Bvh {
         if self.nodes.is_empty() {
             return;
         }
+        let inv = Aabb::ray_inv(d);
+        if self.nodes[0]
+            .bbox
+            .ray_range_inv(o, d, inv, lo, hi)
+            .is_none()
+        {
+            return;
+        }
         let mut stack = [0u32; QUERY_STACK];
         let mut sp = 1;
         while sp > 0 {
             sp -= 1;
             let node = &self.nodes[stack[sp] as usize];
-            if node.bbox.ray_range(o, d, lo, hi).is_none() {
-                continue;
-            }
             if node.count > 0 {
                 let s = node.start as usize;
                 for k in s..s + node.count as usize {
-                    if let Some((a, b)) = self.boxes[k].ray_range(o, d, lo, hi) {
+                    if let Some((a, b)) = self.boxes[k].ray_range_inv(o, d, inv, lo, hi) {
                         f(self.items[k], a, b);
                     }
                 }
             } else {
-                stack[sp] = node.start;
-                stack[sp + 1] = node.start + 1;
-                sp += 2;
+                let left = node.start;
+                let right = node.start + 1;
+                if self.nodes[left as usize]
+                    .bbox
+                    .ray_range_inv(o, d, inv, lo, hi)
+                    .is_some()
+                {
+                    stack[sp] = left;
+                    sp += 1;
+                }
+                if self.nodes[right as usize]
+                    .bbox
+                    .ray_range_inv(o, d, inv, lo, hi)
+                    .is_some()
+                {
+                    stack[sp] = right;
+                    sp += 1;
+                }
             }
         }
     }

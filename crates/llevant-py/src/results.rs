@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use llevant::{Change, Fill, Status, Subject, SurfaceId as RsSurfaceId};
-use llevant_scene::materials::{group_mass, Looks};
+use llevant_scene::materials::{group_masses, Looks};
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -558,12 +558,11 @@ impl Volumes {
         let groups = self.v.grouped(&self.model, g);
         let cell_groups = matches!(g, llevant::GroupBy::Material | llevant::GroupBy::Universe)
             .then(|| self.v.grouped(&self.model, llevant::GroupBy::Cell));
+        let masses = group_masses(&self.model, &looks, g, &groups, cell_groups.as_deref());
         groups
             .iter()
-            .map(|grp| {
-                let mass = group_mass(&self.model, &looks, g, grp, cell_groups.as_deref());
-                Group::of(py, &self.model, grp, self.v.grid.h, mass)
-            })
+            .zip(masses)
+            .map(|(grp, mass)| Group::of(py, &self.model, grp, self.v.grid.h, mass))
             .collect()
     }
 

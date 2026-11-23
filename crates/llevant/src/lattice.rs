@@ -87,6 +87,13 @@ pub struct Lattice {
     pub(crate) fill: LatticeFill,
 }
 
+/// Ray direction projected onto a [`Lattice`]'s faces, for fast stepping.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LatticeRay {
+    nd: [f64; 8],
+    n_faces: usize,
+}
+
 impl Lattice {
     /// Whether the lattice is hexagonal (`LAT=2`).
     pub fn hexagonal(&self) -> bool {
@@ -198,20 +205,36 @@ impl Lattice {
         out
     }
 
+    /// Precomputed ray direction projections onto this lattice's faces.
+    #[inline]
+    pub(crate) fn prepare_ray(&self, d: Vec3) -> LatticeRay {
+        debug_assert!(self.faces.len() <= 8);
+        let mut nd = [0.0; 8];
+        for (k, &(n, _)) in self.faces.iter().enumerate() {
+            nd[k] = dot(n, d);
+        }
+        LatticeRay {
+            nd,
+            n_faces: self.faces.len(),
+        }
+    }
+
     /// Range of `t` over which the line `o + t·d` lies in element `ix`, and
     /// the face it leaves through (an index into `faces`, `None` when it
-    /// never leaves).
-    pub(crate) fn element_range(
+    /// never leaves), using precomputed ray face projections.
+    #[inline]
+    pub(crate) fn element_range_ray(
         &self,
         o: Vec3,
-        d: Vec3,
+        ray: &LatticeRay,
         ix: [i32; 3],
     ) -> (f64, f64, Option<usize>) {
         let q = self.to_element(o, ix);
         let (mut lo, mut hi, mut exit) = (f64::NEG_INFINITY, f64::INFINITY, None);
-        for (k, (n, off)) in self.faces.iter().enumerate() {
-            let nd = dot(*n, d);
-            let gap = off - dot(*n, q);
+        for k in 0..ray.n_faces {
+            let (n, off) = self.faces[k];
+            let nd = ray.nd[k];
+            let gap = off - dot(n, q);
             if nd == 0.0 {
                 if gap < 0.0 {
                     return (f64::INFINITY, f64::NEG_INFINITY, None);
@@ -229,6 +252,23 @@ impl Lattice {
             }
         }
         (lo, hi, exit)
+    }
+
+    /// Index of the neighbouring element directly across face `face`.
+    #[inline]
+    pub(crate) fn step_across(&self, ix: [i32; 3], face: usize) -> [i32; 3] {
+        let [dx, dy, dz] = match (self.hexagonal, face) {
+            (_, 0) => [1, 0, 0],
+            (_, 1) => [-1, 0, 0],
+            (_, 2) => [0, 1, 0],
+            (_, 3) => [0, -1, 0],
+            (true, 4) => [-1, 1, 0],
+            (true, 5) => [1, -1, 0],
+            (true, 6) | (false, 4) => [0, 0, 1],
+            (true, 7) | (false, 5) => [0, 0, -1],
+            _ => [0, 0, 0],
+        };
+        [ix[0] + dx, ix[1] + dy, ix[2] + dz]
     }
 
     /// Elements around `ix` that share at least a corner with it.

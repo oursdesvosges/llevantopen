@@ -39,32 +39,50 @@ pub(crate) struct Chunk {
     next: Vec<u32>,
 }
 
+#[inline]
+fn slice_key<'a>(words: &'a [u32], ends: &[u32], i: usize) -> &'a [u32] {
+    let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+    &words[start..ends[i] as usize]
+}
+
 impl Chunk {
     /// Record a query with label `key`.
     pub fn push(&mut self, key: &[u32]) {
         let h = hash(key);
-        let head = self.heads.get(&h).copied().unwrap_or(NONE);
-        let mut i = head;
-        while i != NONE {
-            if self.key(i as usize) == key {
-                self.ids.push(i);
-                return;
+        match self.heads.entry(h) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let head = *e.get();
+                let mut i = head;
+                while i != NONE {
+                    if slice_key(&self.words, &self.ends, i as usize) == key {
+                        self.ids.push(i);
+                        return;
+                    }
+                    i = self.next[i as usize];
+                }
+                let id = self.ends.len() as u32;
+                self.words.extend_from_slice(key);
+                self.ends.push(self.words.len() as u32);
+                self.hashes.push(h);
+                self.next.push(head);
+                *e.get_mut() = id;
+                self.ids.push(id);
             }
-            i = self.next[i as usize];
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let id = self.ends.len() as u32;
+                self.words.extend_from_slice(key);
+                self.ends.push(self.words.len() as u32);
+                self.hashes.push(h);
+                self.next.push(NONE);
+                e.insert(id);
+                self.ids.push(id);
+            }
         }
-        let id = self.ends.len() as u32;
-        self.words.extend_from_slice(key);
-        self.ends.push(self.words.len() as u32);
-        self.hashes.push(h);
-        self.next.push(head);
-        self.heads.insert(h, id);
-        self.ids.push(id);
     }
 
     /// Key of local id `i`.
     pub fn key(&self, i: usize) -> &[u32] {
-        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
-        &self.words[start..self.ends[i] as usize]
+        slice_key(&self.words, &self.ends, i)
     }
 
     /// Hash of the key of local id `i`.

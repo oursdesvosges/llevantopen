@@ -95,6 +95,7 @@ pub struct GpuModel {
     /// A hash of the shader's source ([`GpuModel::shader_id`]).
     shader_id: u64,
     pipeline_layout: wgpu::PipelineLayout,
+    pipeline_cache: Option<(wgpu::PipelineCache, std::path::PathBuf)>,
     /// Bytes uploaded.
     pub bytes: u64,
     /// Steps past each crossing: `eps_abs + eps_rel · t` (cm).

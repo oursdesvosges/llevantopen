@@ -749,6 +749,15 @@ pub fn grams_per_cm3(density: f64, atomic_mass: f64) -> Option<f64> {
     }
 }
 
+#[inline]
+fn material_look(looks: &Looks, id: i64) -> Option<&MaterialLook> {
+    looks
+        .materials
+        .binary_search_by_key(&id, |m| m.id)
+        .ok()
+        .map(|i| &looks.materials[i])
+}
+
 /// Mass and sampling standard error `(mass_g, mass_sigma_g)` of one cell
 /// given its volume in cm³ and standard error, or `None` for void cells or
 /// positive atom densities whose material atomic mass is unknown.
@@ -764,11 +773,7 @@ pub fn cell_mass(
     if cell.material == 0 {
         return None;
     }
-    let atomic_mass = looks
-        .materials
-        .iter()
-        .find(|m| m.id == cell.material)
-        .map_or(0.0, |m| m.mix.atomic_mass);
+    let atomic_mass = material_look(looks, cell.material).map_or(0.0, |m| m.mix.atomic_mass);
     let rho = grams_per_cm3(cell.density, atomic_mass)?;
     Some((volume_cm3 * rho, sigma_cm3 * rho))
 }
@@ -831,7 +836,7 @@ pub fn group_mass(
                 }
                 return any.then(|| (total_mass, total_var.sqrt()));
             }
-            let ml = looks.materials.iter().find(|m| m.id == mid)?;
+            let ml = material_look(looks, mid)?;
             if ml.density.0.is_finite()
                 && ml.density.1.is_finite()
                 && (ml.density.1 - ml.density.0).abs() <= 1e-12 * ml.density.1.abs().max(1.0)
@@ -882,11 +887,7 @@ pub fn group_mass(
                 let rho = if cell.material == 0 {
                     0.0
                 } else {
-                    let am = looks
-                        .materials
-                        .iter()
-                        .find(|m| m.id == cell.material)
-                        .map_or(0.0, |m| m.mix.atomic_mass);
+                    let am = material_look(looks, cell.material).map_or(0.0, |m| m.mix.atomic_mass);
                     grams_per_cm3(cell.density, am)?
                 };
                 match uniform_rho {
@@ -899,6 +900,68 @@ pub fn group_mass(
             Some((group.volume.estimate * rho, group.volume.sigma * rho))
         }
     }
+}
+
+/// Batch version of [`group_mass`]: when `cell_groups` is given for
+/// `Material` or `Universe` grouping, aggregates all cell masses in a single
+/// `O(C + M)` pass instead of scanning all cells per group.
+pub fn group_masses(
+    model: &Model,
+    looks: &Looks,
+    by: llevant::GroupBy,
+    groups: &[llevant::Group],
+    cell_groups: Option<&[llevant::Group]>,
+) -> Vec<Option<(f64, f64)>> {
+    if matches!(by, llevant::GroupBy::Material | llevant::GroupBy::Universe) {
+        if let Some(cgs) = cell_groups {
+            let mut accum: FxHashMap<i64, (f64, f64)> = FxHashMap::default();
+            for cg in cgs {
+                if cg.status != llevant::Status::Inside {
+                    continue;
+                }
+                let Some(cid) = cg.number else {
+                    continue;
+                };
+                let Some(cidx) = model.cell_index(cid) else {
+                    continue;
+                };
+                let cell = model.cell(cidx);
+                if cell.material == 0 {
+                    continue;
+                }
+                let Some((m, dm)) =
+                    cell_mass(model, looks, cid, cg.volume.estimate, cg.volume.sigma)
+                else {
+                    continue;
+                };
+                let key = match by {
+                    llevant::GroupBy::Material => cell.material,
+                    llevant::GroupBy::Universe => model.units()[cell.unit as usize].universe,
+                    _ => unreachable!(),
+                };
+                let entry = accum.entry(key).or_insert((0.0, 0.0));
+                entry.0 += m;
+                entry.1 += dm * dm;
+            }
+            return groups
+                .iter()
+                .map(|g| {
+                    if g.status != llevant::Status::Inside {
+                        return None;
+                    }
+                    let num = g.number?;
+                    if by == llevant::GroupBy::Material && num == 0 {
+                        return None;
+                    }
+                    accum.get(&num).map(|&(m, var)| (m, var.sqrt()))
+                })
+                .collect();
+        }
+    }
+    groups
+        .iter()
+        .map(|g| group_mass(model, looks, by, g, cell_groups))
+        .collect()
 }
 
 /// Changes to the look of a material: a category to start from and any of
@@ -1415,5 +1478,20 @@ m2 1001 2.0 8016 1.0
         let (mm2, _) =
             group_mass(&m, &looks, llevant::GroupBy::Material, mat2, Some(&by_cell)).unwrap();
         assert!((mm2 - 1.0).abs() < 0.05, "{mm2}");
+
+        for by in [
+            llevant::GroupBy::Cell,
+            llevant::GroupBy::Material,
+            llevant::GroupBy::Universe,
+            llevant::GroupBy::Label,
+        ] {
+            let gs = vols.grouped(&m, by);
+            let want: Vec<_> = gs
+                .iter()
+                .map(|g| group_mass(&m, &looks, by, g, Some(&by_cell)))
+                .collect();
+            let got = group_masses(&m, &looks, by, &gs, Some(&by_cell));
+            assert_eq!(got, want, "batch group_masses mismatch for {by:?}");
+        }
     }
 }

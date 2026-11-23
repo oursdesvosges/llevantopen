@@ -423,10 +423,11 @@ impl Torus {
             r[1] + k * w[1],
             r[2] + k * w[2],
         ];
-        let mut roots = Vec::new();
+        let mut roots = [0.0f64; 8];
+        let mut n_roots = 0usize;
         if self.a == 0.0 {
             // ρ² = K: the quartic would be G², without sign changes.
-            poly_roots(&g, slo, shi, &mut roots);
+            poly_roots(&g, slo, shi, &mut roots, &mut n_roots);
         } else {
             let quartic = [
                 g[0] * g[0] - 4.0 * a2 * r[0],
@@ -435,71 +436,127 @@ impl Torus {
                 2.0 * g[2] * g[1],
                 g[2] * g[2],
             ];
-            poly_roots(&quartic, slo, shi, &mut roots);
+            poly_roots(&quartic, slo, shi, &mut roots, &mut n_roots);
         }
-        for s in roots {
+        for &s in &roots[..n_roots] {
             push(tc + s);
         }
     }
 }
 
+#[inline]
 fn poly_eval(c: &[f64], x: f64) -> f64 {
     c.iter().rev().fold(0.0, |acc, &k| acc * x + k)
 }
 
-/// Sign changes of the polynomial `Σ c[i] xⁱ` on `[lo, hi]`: the roots of
-/// its derivative split the range into monotone pieces, each holding at most
-/// one root, found by bisection.
-fn poly_roots(c: &[f64], lo: f64, hi: f64, out: &mut Vec<f64>) {
+#[inline]
+fn poly_eval_deriv(c: &[f64], x: f64) -> (f64, f64) {
+    let mut f = 0.0;
+    let mut df = 0.0;
+    for &k in c.iter().rev() {
+        df = df * x + f;
+        f = f * x + k;
+    }
+    (f, df)
+}
+
+/// Sign changes of the polynomial `Σ c[i] xⁱ` on `[lo, hi]`: linear and
+/// quadratic equations use closed form; cubic and quartic split `[lo, hi]`
+/// at the derivative's roots and refine each bracket with safeguarded
+/// Newton-Raphson + bisection, with zero heap allocations.
+fn poly_roots(c: &[f64], lo: f64, hi: f64, out: &mut [f64; 8], out_len: &mut usize) {
     let mut n = c.len();
     while n > 0 && c[n - 1] == 0.0 {
         n -= 1;
     }
     let c = &c[..n];
+    let mut emit = |r: f64| {
+        if *out_len < out.len() {
+            out[*out_len] = r;
+            *out_len += 1;
+        }
+    };
     if n <= 1 {
         return;
     }
-    let mut cuts = vec![lo];
-    if n > 2 {
-        let dc: Vec<f64> = (1..n).map(|i| i as f64 * c[i]).collect();
-        let mut crit = Vec::new();
-        poly_roots(&dc, lo, hi, &mut crit);
-        crit.sort_by(f64::total_cmp);
-        cuts.extend(crit);
+    if n == 2 {
+        let r = -c[0] / c[1];
+        if r >= lo && r <= hi {
+            emit(r);
+        }
+        return;
     }
-    cuts.push(hi);
-    for win in cuts.windows(2) {
+    if n == 3 {
+        quadratic_roots(c[2], c[1], c[0], &mut |r| {
+            if r >= lo && r <= hi {
+                emit(r);
+            }
+        });
+        return;
+    }
+    let mut dc = [0.0f64; 4];
+    for i in 1..n {
+        dc[i - 1] = i as f64 * c[i];
+    }
+    let mut crit = [0.0f64; 8];
+    let mut n_crit = 0usize;
+    poly_roots(&dc[..n - 1], lo, hi, &mut crit, &mut n_crit);
+    let crit_slice = &mut crit[..n_crit];
+    crit_slice.sort_unstable_by(f64::total_cmp);
+
+    let mut cuts = [0.0f64; 10];
+    cuts[0] = lo;
+    let mut n_cuts = 1usize;
+    for &x in crit_slice.iter() {
+        if n_cuts < cuts.len() - 1 {
+            cuts[n_cuts] = x;
+            n_cuts += 1;
+        }
+    }
+    cuts[n_cuts] = hi;
+    n_cuts += 1;
+
+    for win in cuts[..n_cuts].windows(2) {
         let (mut a, mut b) = (win[0], win[1]);
         let (fa, fb) = (poly_eval(c, a), poly_eval(c, b));
         if fa == 0.0 {
-            out.push(a);
+            emit(a);
             continue;
         }
         if fa.signum() == fb.signum() || fb == 0.0 {
             continue;
         }
-        // f(a) and f(b) have opposite signs.
-        for _ in 0..200 {
+        // f(a) and f(b) have opposite signs: safeguarded Newton + bisection.
+        let mut x = 0.5 * (a + b);
+        for _ in 0..100 {
+            let (fx, dfx) = poly_eval_deriv(c, x);
+            if fx == 0.0 {
+                a = x;
+                b = x;
+                break;
+            }
+            if fx.signum() == fa.signum() {
+                a = x;
+            } else {
+                b = x;
+            }
             let m = 0.5 * (a + b);
             if m <= a || m >= b {
                 break;
             }
-            let fm = poly_eval(c, m);
-            if fm == 0.0 {
-                a = m;
-                b = m;
-                break;
+            if dfx != 0.0 {
+                let nx = x - fx / dfx;
+                if nx > a && nx < b {
+                    x = nx;
+                    continue;
+                }
             }
-            if fm.signum() == fa.signum() {
-                a = m;
-            } else {
-                b = m;
-            }
+            x = m;
         }
-        out.push(0.5 * (a + b));
+        emit(0.5 * (a + b));
     }
     if poly_eval(c, hi) == 0.0 {
-        out.push(hi);
+        emit(hi);
     }
 }
 

@@ -151,9 +151,23 @@ impl Aabb {
         out.widen()
     }
 
-    /// Range of `t` in `[lo, hi]` over which `o + t·d` is in the box, if any.
+    /// Precomputed reciprocals of a ray direction for [`Aabb::ray_range_inv`].
     #[inline]
-    pub fn ray_range(&self, o: Vec3, d: Vec3, lo: f64, hi: f64) -> Option<(f64, f64)> {
+    pub fn ray_inv(d: Vec3) -> Vec3 {
+        [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]]
+    }
+
+    /// Range of `t` in `[lo, hi]` over which `o + t·d` is in the box, using
+    /// precomputed `inv = Self::ray_inv(d)`.
+    #[inline]
+    pub fn ray_range_inv(
+        &self,
+        o: Vec3,
+        d: Vec3,
+        inv: Vec3,
+        lo: f64,
+        hi: f64,
+    ) -> Option<(f64, f64)> {
         let (mut a, mut b) = (lo, hi);
         for i in 0..3 {
             if d[i] == 0.0 {
@@ -162,13 +176,18 @@ impl Aabb {
                 }
                 continue;
             }
-            let inv = 1.0 / d[i];
-            let (t1, t2) = ((self.lo[i] - o[i]) * inv, (self.hi[i] - o[i]) * inv);
-            let (t1, t2) = if inv < 0.0 { (t2, t1) } else { (t1, t2) };
+            let (t1, t2) = ((self.lo[i] - o[i]) * inv[i], (self.hi[i] - o[i]) * inv[i]);
+            let (t1, t2) = if inv[i] < 0.0 { (t2, t1) } else { (t1, t2) };
             a = a.max(t1);
             b = b.min(t2);
         }
         (a <= b).then_some((a, b))
+    }
+
+    /// Range of `t` in `[lo, hi]` over which `o + t·d` is in the box, if any.
+    #[inline]
+    pub fn ray_range(&self, o: Vec3, d: Vec3, lo: f64, hi: f64) -> Option<(f64, f64)> {
+        self.ray_range_inv(o, d, Self::ray_inv(d), lo, hi)
     }
 
     pub fn widen(&self) -> Aabb {

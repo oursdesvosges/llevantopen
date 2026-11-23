@@ -320,3 +320,196 @@ fn lattice_faces_on_the_envelope_leave_no_slivers() {
         );
     }
 }
+
+fn check_first_hits_agree(m: &Model, rays: &[Line], vis: &llevant::Visibility) {
+    let hits = m.first_hits(rays, vis, None).unwrap();
+    let tr = m.trace(rays, Depth::All).unwrap();
+    for r_idx in 0..rays.len() {
+        let mut expected_t = f64::INFINITY;
+        for seg_idx in tr.segments(r_idx) {
+            let lbl = &tr.labels[tr.ids[seg_idx] as usize];
+            let visible = match lbl.status {
+                Status::Inside => {
+                    let last = lbl.path.last().map(|s| s.cell);
+                    let all_vis = lbl.path.iter().all(|s| vis.cells[s.cell as usize]);
+                    let is_ghost = last.is_some_and(|c| vis.is_ghost(c));
+                    all_vis && !is_ghost
+                }
+                Status::Gap => vis.gaps && !vis.veil,
+                Status::Overlap | Status::Unsupported | Status::TooDeep => {
+                    vis.problems && !vis.veil
+                }
+                Status::OnSurface | _ => false,
+            };
+            if visible {
+                expected_t = tr.t0[seg_idx];
+                break;
+            }
+        }
+        let got_t = hits.t[r_idx];
+        assert!(
+            (got_t.is_infinite() && expected_t.is_infinite()) || (got_t - expected_t).abs() <= 1e-6,
+            "ray {r_idx}: first_hit={got_t:?} vs trace={expected_t:?}"
+        );
+    }
+}
+
+#[test]
+fn tangent_and_near_coincident_surfaces_agree_with_reference_and_first_hits() {
+    // Tangent grazing lines across sphere (r=5), cylinder (r=3), and torus (R=6, r=2)
+    // plus near-coincident planes separated by 1e-9 (< tol) and 1e-6 (> tol).
+    let deck = "\
+tangent and near-coincident surfaces
+1 1 -1.0 -1 imp:n=1
+2 2 -2.0 1 -2 -5 6 imp:n=1
+3 3 -3.0 -3 4 imp:n=1
+4 0 5 : -6 : -4 imp:n=1
+5 0 (1 2 -5 6 3) : -9 #(-9) : -99 #(-99) imp:n=1
+10 0 -9 -1 imp:n=1
+11 1 -1.0 -10 11 -12 13 imp:n=1
+12 0 (1 : 10) (2 : 10) 99 -999 imp:n=1
+999 0 999 imp:n=0
+
+1 so 5
+2 cz 3
+3 tx 0 0 15 6 2 2
+4 pz 10
+5 pz 8
+6 pz -8
+9 pz 8.000000001
+10 px 12.000000001
+11 px 12.0
+12 py 4
+13 py -4
+99 so 40
+999 so 200
+
+m1 1001.32c 1
+m2 26056.32c 1
+m3 92235.32c 1
+";
+    let _ = deck;
+    // Clean, unambiguous deck with grazing quadrics/torus and near-coincident planes:
+    let clean = "\
+tangent and near-coincident regression deck
+1 1 -1.0 -1 imp:n=1
+2 2 -2.0 -2 -5 6 1 imp:n=1
+3 3 -3.0 -3 imp:n=1
+4 4 -4.0 10 -11 12 -13 5 -6 imp:n=1
+5 0 -99 1 (2 : 5 : -6) 3 (-10 : 11 : -12 : 13 : -5 : 6) imp:n=1
+99 0 99 imp:n=0
+
+1 s 0 0 0 5
+2 c/z 0 0 3
+3 t 0 0 15 6 2 2
+5 pz 8
+6 pz -8
+10 px 10
+11 px 10.000000001
+12 py -2
+13 py 2
+99 so 100
+
+m1 1001.32c 1
+m2 26056.32c 1
+m3 92235.32c 1
+m4 13027.32c 1
+";
+    let m = Model::from_text(clean, &Options::default());
+    let rays = vec![
+        // Sphere tangent at y = 5 and near-tangent at 5 ± 1e-9:
+        line([-20.0, 5.0, 0.0], [1.0, 0.0, 0.0], 0.0, 40.0),
+        line([-20.0, 5.0 - 1e-9, 0.0], [1.0, 0.0, 0.0], 0.0, 40.0),
+        line([-20.0, 5.0 + 1e-9, 0.0], [1.0, 0.0, 0.0], 0.0, 40.0),
+        // Cylinder tangent at x = 3 and near-tangent:
+        line([3.0, -20.0, 6.5], [0.0, 1.0, 0.0], 0.0, 40.0),
+        line([3.0 - 1e-10, -20.0, 6.5], [0.0, 1.0, 0.0], 0.0, 40.0),
+        // Torus outer limb tangent at y = 8 and top limb z = 17:
+        line([-20.0, 8.0, 15.0], [1.0, 0.0, 0.0], 0.0, 40.0),
+        line([-20.0, 0.0, 17.0], [1.0, 0.0, 0.0], 0.0, 40.0),
+        // Sliver planes 10 .. 10.000000001 (below 1e-8 tolerance):
+        line([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, 30.0),
+        line([10.0000000005, -10.0, 0.0], [0.0, 1.0, 0.0], 0.0, 20.0),
+    ];
+    let pts: Vec<[f64; 3]> = rays
+        .iter()
+        .flat_map(|r| {
+            (0..10).map(move |k| {
+                let t = 1.0 + 3.5 * k as f64;
+                [
+                    r.origin[0] + r.dir[0] * t,
+                    r.origin[1] + r.dir[1] * t,
+                    r.origin[2] + r.dir[2] * t,
+                ]
+            })
+        })
+        .collect();
+    let got_p = m.classify(&pts, Depth::All);
+    let ref_p = llevant::reference::classify(&m, &pts, Depth::All);
+    for i in 0..pts.len() {
+        let g = &got_p.labels[got_p.ids[i] as usize];
+        let r = &ref_p.labels[ref_p.ids[i] as usize];
+        assert_eq!(g, r, "point {i} {:?}: {g:?} vs {r:?}", pts[i]);
+    }
+    let got_t = m.trace(&rays, Depth::All).unwrap();
+    let ref_t = llevant::reference::trace(&m, &rays, Depth::All).unwrap();
+    for (li, ray) in rays.iter().enumerate() {
+        let a: Vec<Segment> = got_t.segments(li).map(|k| got_t.segment(k)).collect();
+        let b: Vec<Segment> = ref_t.segments(li).map(|k| ref_t.segment(k)).collect();
+        assert!(
+            llevant::reference::traces_agree(&m, ray, &a, &b),
+            "tangent/near-coincident trace {li} diverged from reference:\ngot={a:?}\nref={b:?}"
+        );
+    }
+    check_first_hits_agree(&m, &rays, &llevant::Visibility::solid(&m));
+}
+
+#[test]
+fn sparse_world_first_hits_matches_trace_with_and_without_skip() {
+    let mut cards = String::from("sparse spheres in huge void world\n");
+    let mut void_terms = String::from("-5000");
+    let mut surfs = String::new();
+    let mut sid = 1usize;
+    for ix in -2..=2 {
+        for iy in -2..=2 {
+            for iz in -2..=2 {
+                let x = ix as f64 * 15.0;
+                let y = iy as f64 * 15.0;
+                let z = iz as f64 * 15.0;
+                cards.push_str(&format!("{sid} 1 -1.0 -{sid} imp:n=1\n"));
+                surfs.push_str(&format!("{sid} s {x} {y} {z} 2.5\n"));
+                void_terms.push_str(&format!(" {sid}"));
+                sid += 1;
+            }
+        }
+    }
+    cards.push_str(&format!("5000 0 {void_terms} imp:n=1\n"));
+    cards.push_str("5001 0 5000 imp:n=0\n\n");
+    cards.push_str(&surfs);
+    cards.push_str("5000 so 500000\n\nm1 26056.32c 1\n");
+
+    let m = model(&cards);
+    let mut rays = Vec::with_capacity(256);
+    for j in 0..16 {
+        for i in 0..16 {
+            let y = -45.0 + j as f64 * 6.0;
+            let z = -45.0 + i as f64 * 6.0;
+            rays.push(line([-600.0, y, z], [1.0, 0.0, 0.0], 0.0, 1200.0));
+        }
+    }
+    let vis_solid = llevant::Visibility::solid(&m);
+    check_first_hits_agree(&m, &rays, &vis_solid);
+
+    let vis_all = llevant::Visibility::all(&m);
+    check_first_hits_agree(&m, &rays, &vis_all);
+
+    let vis_nogap = llevant::Visibility {
+        gaps: false,
+        problems: false,
+        ..vis_solid
+    };
+    let skip = m.skip(&vis_nogap).unwrap();
+    let hits_skip = m.first_hits(&rays, &vis_nogap, Some(&skip)).unwrap();
+    let hits_noskip = m.first_hits(&rays, &vis_nogap, None).unwrap();
+    assert_eq!(hits_skip.t, hits_noskip.t);
+}

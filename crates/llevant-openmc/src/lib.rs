@@ -44,15 +44,22 @@ pub fn is_openmc_path(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
 }
 
+fn utf8_prefix(input: &[u8], max_bytes: usize) -> &str {
+    let slice = &input[..input.len().min(max_bytes)];
+    match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&slice[..e.valid_up_to()]).unwrap_or(""),
+    }
+}
+
 /// Returns true if raw bytes look like an OpenMC XML document (`<model>` or `<geometry>`).
 pub fn is_openmc_bytes(input: &[u8]) -> bool {
-    let s = std::str::from_utf8(input).unwrap_or("");
-    let trimmed = s.trim_start_matches('\u{feff}').trim_start();
+    let prefix = utf8_prefix(input, 4096);
+    let trimmed = prefix.trim_start_matches('\u{feff}').trim_start();
     if !trimmed.starts_with('<') {
         return false;
     }
-    let prefix = &trimmed[..trimmed.len().min(4096)];
-    prefix.contains("<geometry") || prefix.contains("<model")
+    trimmed.contains("<geometry") || trimmed.contains("<model")
 }
 
 /// Read an input file (either MCNP or OpenMC XML / directory) and return bytes ready
@@ -147,15 +154,17 @@ impl XmlNode {
 }
 
 /// Decode standard XML character entities (`&lt;`, `&gt;`, `&quot;`, `&apos;`, `&amp;`).
-fn unescape_xml(s: &str) -> String {
+fn unescape_xml(s: &str) -> Cow<'_, str> {
     if !s.contains('&') {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    Cow::Owned(
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
 }
 
 /// Parse an OpenMC XML document into a tree of root [`XmlNode`] elements.
@@ -300,7 +309,7 @@ fn parse_xml_nodes(src: &str) -> Result<Vec<XmlNode>, OpenMcError> {
                     while pos < len && bytes[pos] != quote {
                         pos += 1;
                     }
-                    let val = unescape_xml(&src[v_start..pos]);
+                    let val = unescape_xml(&src[v_start..pos]).into_owned();
                     if pos < len {
                         pos += 1; // skip closing quote
                     }
@@ -310,7 +319,7 @@ fn parse_xml_nodes(src: &str) -> Result<Vec<XmlNode>, OpenMcError> {
                     while pos < len && !bytes[pos].is_ascii_whitespace() && bytes[pos] != b'>' {
                         pos += 1;
                     }
-                    attrs.insert(key, unescape_xml(&src[v_start..pos]));
+                    attrs.insert(key, unescape_xml(&src[v_start..pos]).into_owned());
                 }
             }
         }
@@ -349,6 +358,60 @@ fn collect_elements<'a>(nodes: &'a [XmlNode], tag: &str, out: &mut Vec<&'a XmlNo
 // ---------------------------------------------------------------------------
 // OpenMC Domain Structures
 // ---------------------------------------------------------------------------
+
+/// An OpenMC `<cell>` configured with instance-dependent distributed materials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistributedMaterialCell {
+    pub cell_id: i64,
+    pub name: String,
+    pub materials: Vec<Option<i64>>,
+}
+
+/// Inspect `<cell material="..."/>` entries in OpenMC XML that declare more
+/// than one material assignment across lattice/universe instances.
+pub fn distributed_materials(xml: &str) -> Result<Vec<DistributedMaterialCell>, OpenMcError> {
+    let docs = parse_xml_nodes(xml)?;
+    let mut geom_containers = Vec::new();
+    collect_elements(&docs, "geometry", &mut geom_containers);
+    let geom_scope: Vec<XmlNode> = if geom_containers.is_empty() {
+        docs
+    } else {
+        geom_containers.into_iter().cloned().collect()
+    };
+    let mut raw_cells = Vec::new();
+    collect_elements(&geom_scope, "cell", &mut raw_cells);
+    let mut out = Vec::new();
+    for cnode in raw_cells {
+        let Some(m_attr) = cnode.attr("material") else {
+            continue;
+        };
+        let toks: Vec<&str> = m_attr.split_whitespace().collect();
+        if toks.len() <= 1 {
+            continue;
+        }
+        let id = cnode
+            .attr("id")
+            .ok_or_else(|| OpenMcError::Parse("<cell> missing `id`".into()))?
+            .parse::<i64>()
+            .map_err(|_| OpenMcError::Parse("invalid cell id".into()))?;
+        let mats = toks
+            .iter()
+            .map(|t| {
+                if t.eq_ignore_ascii_case("void") {
+                    None
+                } else {
+                    t.parse::<i64>().ok()
+                }
+            })
+            .collect();
+        out.push(DistributedMaterialCell {
+            cell_id: id,
+            name: cnode.attr("name").unwrap_or("").to_string(),
+            materials: mats,
+        });
+    }
+    Ok(out)
+}
 
 #[derive(Debug, Clone)]
 struct OpenMcMaterial {
@@ -1073,6 +1136,7 @@ pub fn openmc_xml_to_mcnp(
     let mut max_cell_id: i64 = 0;
     let mut all_cell_universes: BTreeSet<i64> = BTreeSet::new();
     let mut filled_targets: HashSet<i64> = HashSet::new();
+    let mut dist_warnings: Vec<String> = Vec::new();
 
     for cnode in raw_cells {
         let id: i64 = cnode
@@ -1096,6 +1160,13 @@ pub fn openmc_xml_to_mcnp(
                     .collect();
                 let first = parsed.iter().flatten().copied().next();
                 if toks.len() > 1 {
+                    let distinct: BTreeSet<Option<i64>> = parsed.iter().copied().collect();
+                    let first_lbl = first.map_or_else(|| "void".to_string(), |m| m.to_string());
+                    dist_warnings.push(format!(
+                        "c WARNING: OpenMC cell {id} has distributed materials ({} instances, {} distinct); MCNP cell uses first material {first_lbl}\n",
+                        parsed.len(),
+                        distinct.len()
+                    ));
                     let note = format!("distributed materials: {}", toks.join(" "));
                     if name.is_empty() {
                         name = note;
@@ -1460,6 +1531,9 @@ pub fn openmc_xml_to_mcnp(
 
     let mut mcnp = String::with_capacity(4096);
     mcnp.push_str("OpenMC XML model loaded natively by llevant-openmc\n");
+    for warn in &dist_warnings {
+        mcnp.push_str(warn);
+    }
 
     // -----------------------------------------------------------------------
     // Block 1: Cell Cards
@@ -2081,6 +2155,19 @@ mod tests {
         let mcnp = openmc_xml_to_mcnp(xml, None).unwrap();
         assert!(mcnp.contains("1 1 -10 -1 -2 imp:n=1"), "{mcnp}");
         assert!(mcnp.contains("distributed materials: 1 2"), "{mcnp}");
+        assert!(
+            mcnp.contains("c WARNING: OpenMC cell 1 has distributed materials (2 instances, 2 distinct); MCNP cell uses first material 1"),
+            "{mcnp}"
+        );
+        let dist = distributed_materials(xml).unwrap();
+        assert_eq!(
+            dist,
+            vec![DistributedMaterialCell {
+                cell_id: 1,
+                name: "Fuel Zone".to_string(),
+                materials: vec![Some(1), Some(2)],
+            }]
+        );
 
         let plots = parse_openmc_plots(xml).unwrap();
         assert_eq!(plots.len(), 1);

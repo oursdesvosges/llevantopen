@@ -7,7 +7,7 @@ use std::time::Instant;
 use llevant::{Aabb, Axis, Depth, Model, Scope, Slice, Volume, VolumeGrid};
 use llevant_render::colours::{self, ColourBy, Outlines, Paint};
 use llevant_render::png::write_png;
-use llevant_scene::materials::{group_mass, Looks};
+use llevant_scene::materials::{group_masses, Looks};
 use serde_json::{json, Value};
 
 use crate::args::{Format, GridArgs, GroupBy, Open};
@@ -338,10 +338,7 @@ fn print_volumes(
     format: Format,
 ) {
     let name = by.name();
-    let masses: Vec<Option<(f64, f64)>> = groups
-        .iter()
-        .map(|g| group_mass(m, looks, by.into(), g, cell_groups))
-        .collect();
+    let masses = group_masses(m, looks, by.into(), groups, cell_groups);
     let unconverged = |i: usize| c.is_some_and(|c| c.unconverged.binary_search(&i).is_ok());
     let status = |c: &llevant::Converged, i: usize| {
         if c.empty.binary_search(&i).is_ok() {

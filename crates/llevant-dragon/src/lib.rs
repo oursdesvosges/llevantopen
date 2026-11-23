@@ -46,12 +46,21 @@ pub fn is_dragon_path(path: &Path) -> bool {
         })
 }
 
+fn utf8_prefix(input: &[u8], max_bytes: usize) -> &str {
+    let slice = &input[..input.len().min(max_bytes)];
+    match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(e) => std::str::from_utf8(&slice[..e.valid_up_to()]).unwrap_or(""),
+    }
+}
+
 /// Returns `true` if raw input bytes appear to contain a DRAGON5 `GEO:` module invocation.
 pub fn is_dragon_bytes(input: &[u8]) -> bool {
-    let Ok(s) = std::str::from_utf8(input) else {
+    let prefix = utf8_prefix(input, 65_536);
+    if !prefix.contains(":=") {
         return false;
-    };
-    let toks = tokenize(s);
+    }
+    let toks = tokenize(prefix);
     toks.windows(2)
         .any(|w| w[0] == ":=" && w[1].eq_ignore_ascii_case("GEO:"))
 }
@@ -169,6 +178,11 @@ struct DragonGeom {
     offcenter: [f64; 2],
     mix: Vec<i64>,
     cells: Vec<String>,
+    splitx: Vec<i64>,
+    splity: Vec<i64>,
+    splitz: Vec<i64>,
+    splitr: Vec<i64>,
+    boundaries: Vec<(String, String)>,
     sub_geoms: HashMap<String, DragonGeom>,
 }
 
@@ -303,6 +317,11 @@ fn parse_geo_block(
         offcenter: [0.0, 0.0],
         mix: Vec::new(),
         cells: Vec::new(),
+        splitx: Vec::new(),
+        splity: Vec::new(),
+        splitz: Vec::new(),
+        splitr: Vec::new(),
+        boundaries: Vec::new(),
         sub_geoms: HashMap::new(),
     };
 
@@ -399,18 +418,40 @@ fn parse_geo_block(
                 }
             }
             "X-" | "X+" | "Y-" | "Y+" | "Z-" | "Z+" | "HBC" => {
-                // Skip boundary condition token + optional numeric albedo
-                if toks.get(*idx).is_some_and(|t| !is_keyword(t)) {
+                let mut vals = Vec::new();
+                while toks.get(*idx).is_some_and(|t| !is_keyword(t)) {
+                    vals.push(toks[*idx].clone());
                     *idx += 1;
                 }
-                if toks
-                    .get(*idx)
-                    .is_some_and(|t| t.parse::<f64>().is_ok() && !is_keyword(t))
-                {
+                if !vals.is_empty() {
+                    geom.boundaries.push((kw, vals.join(" ")));
+                }
+            }
+            "SPLITX" => {
+                while let Some(v) = toks.get(*idx).and_then(|t| t.parse::<i64>().ok()) {
+                    geom.splitx.push(v);
                     *idx += 1;
                 }
             }
-            "SPLITX" | "SPLITY" | "SPLITZ" | "SPLITR" | "SECT" | "TURN" => {
+            "SPLITY" => {
+                while let Some(v) = toks.get(*idx).and_then(|t| t.parse::<i64>().ok()) {
+                    geom.splity.push(v);
+                    *idx += 1;
+                }
+            }
+            "SPLITZ" => {
+                while let Some(v) = toks.get(*idx).and_then(|t| t.parse::<i64>().ok()) {
+                    geom.splitz.push(v);
+                    *idx += 1;
+                }
+            }
+            "SPLITR" => {
+                while let Some(v) = toks.get(*idx).and_then(|t| t.parse::<i64>().ok()) {
+                    geom.splitr.push(v);
+                    *idx += 1;
+                }
+            }
+            "SECT" | "TURN" => {
                 while toks.get(*idx).is_some_and(|t| !is_keyword(t)) {
                     *idx += 1;
                 }
@@ -554,18 +595,117 @@ fn geom_span(g: &DragonGeom) -> Result<GeomSpan, DragonError> {
     Ok(([x0, x1], [y0, y1], z))
 }
 
+fn expand_linear_mesh(
+    nodes: &[f64],
+    splits: &[i64],
+    label: &str,
+) -> Result<(Vec<f64>, Vec<usize>), DragonError> {
+    let orig_n = nodes.len() - 1;
+    if splits.is_empty() {
+        return Ok((nodes.to_vec(), (0..orig_n).collect()));
+    }
+    if splits.len() != orig_n {
+        return Err(DragonError::Parse(format!(
+            "{label} split count ({}) does not match interval count ({orig_n})",
+            splits.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(orig_n * 2 + 1);
+    let mut parents = Vec::with_capacity(orig_n * 2);
+    out.push(nodes[0]);
+    for (i, &s) in splits.iter().enumerate() {
+        if s == 0 {
+            return Err(DragonError::Parse(format!(
+                "{label} split factor must be non-zero"
+            )));
+        }
+        let m = s.unsigned_abs() as usize;
+        let a = nodes[i];
+        let b = nodes[i + 1];
+        for k in 1..=m {
+            let v = if k == m {
+                b
+            } else {
+                a + (b - a) * (k as f64 / m as f64)
+            };
+            out.push(v);
+            parents.push(i);
+        }
+    }
+    Ok((out, parents))
+}
+
+/// Expand concentric DRAGON5 `RADIUS` entries using `SPLITR`: positive values
+/// subdivide each ring into equal-area concentric sub-rings; negative values
+/// subdivide into equal-radius sub-rings.
+fn expand_radii(
+    radii: &[f64],
+    splits: &[i64],
+    name: &str,
+) -> Result<(Vec<f64>, Vec<usize>), DragonError> {
+    if splits.is_empty() {
+        return Ok((radii.to_vec(), (0..radii.len()).collect()));
+    }
+    if splits.len() != radii.len() {
+        return Err(DragonError::Parse(format!(
+            "`{name}` SPLITR count ({}) does not match RADIUS count ({})",
+            splits.len(),
+            radii.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(radii.len() * 2);
+    let mut parents = Vec::with_capacity(radii.len() * 2);
+    for (i, &s) in splits.iter().enumerate() {
+        if s == 0 {
+            return Err(DragonError::Parse(format!(
+                "`{name}` SPLITR entry must be non-zero"
+            )));
+        }
+        let r_prev = if i == 0 { 0.0 } else { radii[i - 1] };
+        let r_cur = radii[i];
+        let m = s.unsigned_abs() as usize;
+        for k in 1..=m {
+            let rk = if k == m {
+                r_cur
+            } else if s > 0 {
+                let frac = k as f64 / m as f64;
+                (r_prev * r_prev + frac * (r_cur * r_cur - r_prev * r_prev)).sqrt()
+            } else {
+                let frac = k as f64 / m as f64;
+                r_prev + (r_cur - r_prev) * frac
+            };
+            out.push(rk);
+            parents.push(i);
+        }
+    }
+    Ok((out, parents))
+}
+
 fn emit_carcel(
     g: &DragonGeom,
     em: &mut McnpEmitter,
     in_univ: Option<i64>,
     center_local: bool,
 ) -> Result<Option<[i64; 6]>, DragonError> {
-    let ([x0, x1], [y0, y1], znodes) = geom_span(g)?;
+    let ([x0, x1], [y0, y1], raw_znodes) = geom_span(g)?;
     validate_radii(&g.radii, &g.name)?;
+    let orig_nz = raw_znodes.len() - 1;
+    let orig_nr = g.radii.len();
+    let orig_nx = g.meshx.len() - 1;
+    let orig_ny = g.meshy.len() - 1;
+
+    let (xnodes, x_parents) =
+        expand_linear_mesh(&g.meshx, &g.splitx, &format!("{} MESHX", g.name))?;
+    let (ynodes, y_parents) =
+        expand_linear_mesh(&g.meshy, &g.splity, &format!("{} MESHY", g.name))?;
+    let (znodes, z_parents) =
+        expand_linear_mesh(&raw_znodes, &g.splitz, &format!("{} MESHZ", g.name))?;
+    let (radii, r_parents) = expand_radii(&g.radii, &g.splitr, &g.name)?;
+
+    let nx = xnodes.len() - 1;
+    let ny = ynodes.len() - 1;
     let nz = znodes.len() - 1;
-    let nr = g.radii.len();
-    let nx = g.meshx.len() - 1;
-    let ny = g.meshy.len() - 1;
+    let nr = radii.len();
 
     let shift_x = if center_local { 0.5 * (x0 + x1) } else { 0.0 };
     let shift_y = if center_local { 0.5 * (y0 + y1) } else { 0.0 };
@@ -577,34 +717,56 @@ fn emit_carcel(
     let cx = 0.5 * (x0 + x1) - shift_x + g.offcenter[0];
     let cy = 0.5 * (y0 + y1) - shift_y + g.offcenter[1];
 
-    let simple_expected = (nr + 1) * nz;
-    let split_expected = (nr + 1) * nx * ny * nz;
-    if g.mix.len() != simple_expected && !((nx * ny > 1) && g.mix.len() == split_expected) {
+    let unsplit_simple = (orig_nr + 1) * orig_nz;
+    let unsplit_quad = (orig_nr + 1) * orig_nx * orig_ny * orig_nz;
+    let split_simple = (nr + 1) * nz;
+    let split_quad = (nr + 1) * nx * ny * nz;
+
+    #[derive(Clone, Copy)]
+    enum CarcelMixMode {
+        UnsplitSimple,
+        SplitSimple,
+        UnsplitQuad,
+        SplitQuad,
+    }
+
+    let mix_mode = if g.mix.len() == unsplit_simple && nx == 1 && ny == 1 {
+        CarcelMixMode::UnsplitSimple
+    } else if g.mix.len() == split_simple && nx == 1 && ny == 1 {
+        CarcelMixMode::SplitSimple
+    } else if g.mix.len() == unsplit_simple && orig_nx * orig_ny == 1 {
+        CarcelMixMode::UnsplitSimple
+    } else if g.mix.len() == unsplit_quad && orig_nx * orig_ny > 1 {
+        CarcelMixMode::UnsplitQuad
+    } else if g.mix.len() == split_simple {
+        CarcelMixMode::SplitSimple
+    } else if g.mix.len() == split_quad && nx * ny > 1 {
+        CarcelMixMode::SplitQuad
+    } else {
         return Err(DragonError::Parse(format!(
-            "CARCEL `{}` MIX has {} entries, expected {simple_expected} ({} rings + moderator across {nz} z-slices){}",
+            "CARCEL `{}` MIX has {} entries, expected {unsplit_simple} ({} rings + moderator across {orig_nz} z-slices){}",
             g.name,
             g.mix.len(),
-            nr,
-            if nx * ny > 1 {
-                format!(" or {split_expected} for subdivided mesh")
+            orig_nr,
+            if nx * ny > 1 || orig_nx * orig_ny > 1 {
+                format!(" or {unsplit_quad} / {split_quad} for subdivided mesh")
+            } else if split_simple != unsplit_simple {
+                format!(" or {split_simple} for SPLITR/SPLITZ rings")
             } else {
                 String::new()
             }
         )));
-    }
+    };
 
-    let csurfs: Vec<i64> = g
-        .radii
+    let csurfs: Vec<i64> = radii
         .iter()
         .map(|&r| em.push_surf("c/z", &[cx, cy, r]))
         .collect();
-    let xsurfs: Vec<i64> = g
-        .meshx
+    let xsurfs: Vec<i64> = xnodes
         .iter()
         .map(|&x| em.push_surf("px", &[x - shift_x]))
         .collect();
-    let ysurfs: Vec<i64> = g
-        .meshy
+    let ysurfs: Vec<i64> = ynodes
         .iter()
         .map(|&y| em.push_surf("py", &[y - shift_y]))
         .collect();
@@ -613,17 +775,27 @@ fn emit_carcel(
         .map(|&z| em.push_surf("pz", &[z - shift_z]))
         .collect();
 
-    if g.mix.len() == simple_expected {
+    if nx == 1
+        && ny == 1
+        && matches!(
+            mix_mode,
+            CarcelMixMode::UnsplitSimple | CarcelMixMode::SplitSimple
+        )
+    {
         let bx_lo = xsurfs[0];
         let bx_hi = *xsurfs.last().unwrap();
         let by_lo = ysurfs[0];
         let by_hi = *ysurfs.last().unwrap();
-        let mut mix_idx = 0usize;
         for iz in 0..nz {
             let zbox = format!("{} -{}", zsurfs[iz], zsurfs[iz + 1]);
             for ir in 0..nr {
-                let mid = g.mix[mix_idx];
-                mix_idx += 1;
+                let mid = match mix_mode {
+                    CarcelMixMode::UnsplitSimple => {
+                        g.mix[z_parents[iz] * (orig_nr + 1) + r_parents[ir]]
+                    }
+                    CarcelMixMode::SplitSimple => g.mix[iz * (nr + 1) + ir],
+                    _ => unreachable!(),
+                };
                 let rad_expr = if ir == 0 {
                     format!("-{} {bx_lo} -{bx_hi} {by_lo} -{by_hi}", csurfs[0])
                 } else {
@@ -640,8 +812,11 @@ fn emit_carcel(
                     &format!("{} ring {ir} z={iz} mix={mid}", g.name),
                 );
             }
-            let mod_mid = g.mix[mix_idx];
-            mix_idx += 1;
+            let mod_mid = match mix_mode {
+                CarcelMixMode::UnsplitSimple => g.mix[z_parents[iz] * (orig_nr + 1) + orig_nr],
+                CarcelMixMode::SplitSimple => g.mix[iz * (nr + 1) + nr],
+                _ => unreachable!(),
+            };
             let outer = if let Some(&last_c) = csurfs.last() {
                 format!("{last_c} {bx_lo} -{bx_hi} {by_lo} -{by_hi} {zbox}")
             } else {
@@ -656,7 +831,6 @@ fn emit_carcel(
         }
     } else {
         // Subdivided quadrant CARCEL
-        let mut mix_idx = 0usize;
         for iz in 0..nz {
             let zbox = format!("{} -{}", zsurfs[iz], zsurfs[iz + 1]);
             for iy in 0..ny {
@@ -668,9 +842,31 @@ fn emit_carcel(
                         ysurfs[iy],
                         ysurfs[iy + 1]
                     );
+                    let cell_mix = |ring_or_mod: Option<usize>| -> i64 {
+                        match mix_mode {
+                            CarcelMixMode::UnsplitSimple => {
+                                let r_idx = ring_or_mod.map_or(orig_nr, |ir| r_parents[ir]);
+                                g.mix[z_parents[iz] * (orig_nr + 1) + r_idx]
+                            }
+                            CarcelMixMode::SplitSimple => {
+                                let r_idx = ring_or_mod.unwrap_or(nr);
+                                g.mix[iz * (nr + 1) + r_idx]
+                            }
+                            CarcelMixMode::UnsplitQuad => {
+                                let q = (z_parents[iz] * orig_ny + y_parents[iy]) * orig_nx
+                                    + x_parents[ix];
+                                let r_idx = ring_or_mod.map_or(orig_nr, |ir| r_parents[ir]);
+                                g.mix[q * (orig_nr + 1) + r_idx]
+                            }
+                            CarcelMixMode::SplitQuad => {
+                                let q = (iz * ny + iy) * nx + ix;
+                                let r_idx = ring_or_mod.unwrap_or(nr);
+                                g.mix[q * (nr + 1) + r_idx]
+                            }
+                        }
+                    };
                     for ir in 0..nr {
-                        let mid = g.mix[mix_idx];
-                        mix_idx += 1;
+                        let mid = cell_mix(Some(ir));
                         let rad = if ir == 0 {
                             format!("-{} {qbox}", csurfs[0])
                         } else {
@@ -683,8 +879,7 @@ fn emit_carcel(
                             &format!("{} ({ix},{iy},{iz}) ring {ir} mix={mid}", g.name),
                         );
                     }
-                    let mod_mid = g.mix[mix_idx];
-                    mix_idx += 1;
+                    let mod_mid = cell_mix(None);
                     let outer = if let Some(&last_c) = csurfs.last() {
                         format!("{last_c} {qbox}")
                     } else {
@@ -723,31 +918,48 @@ fn emit_tube(g: &DragonGeom, em: &mut McnpEmitter) -> Result<Vec<String>, Dragon
             g.name
         )));
     }
-    let znodes = if g.meshz.is_empty() {
+    let raw_znodes = if g.meshz.is_empty() {
         vec![-10.0, 10.0]
     } else {
         bounds_from_mesh(&g.meshz, &format!("{} MESHZ", g.name))?;
         g.meshz.clone()
     };
-    let nr = g.radii.len();
+    let orig_nr = g.radii.len();
+    let orig_nz = raw_znodes.len() - 1;
+    let (radii, r_parents) = expand_radii(&g.radii, &g.splitr, &g.name)?;
+    let (znodes, z_parents) =
+        expand_linear_mesh(&raw_znodes, &g.splitz, &format!("{} MESHZ", g.name))?;
+    let nr = radii.len();
     let nz = znodes.len() - 1;
-    let expected = nr * nz;
-    if g.mix.len() != expected {
+    let unsplit_expected = orig_nr * orig_nz;
+    let split_expected = nr * nz;
+    let use_split_mix = if g.mix.len() == unsplit_expected {
+        false
+    } else if g.mix.len() == split_expected {
+        true
+    } else {
         return Err(DragonError::Parse(format!(
-            "TUBE `{}` MIX has {} entries, expected {expected} ({nr} rings x {nz} z-slices)",
+            "TUBE `{}` MIX has {} entries, expected {unsplit_expected} ({orig_nr} rings x {orig_nz} z-slices){}",
             g.name,
-            g.mix.len()
+            g.mix.len(),
+            if split_expected != unsplit_expected {
+                format!(" or {split_expected} for SPLITR/SPLITZ")
+            } else {
+                String::new()
+            }
         )));
-    }
+    };
 
-    let csurfs: Vec<i64> = g.radii.iter().map(|&r| em.push_surf("cz", &[r])).collect();
+    let csurfs: Vec<i64> = radii.iter().map(|&r| em.push_surf("cz", &[r])).collect();
     let zsurfs: Vec<i64> = znodes.iter().map(|&z| em.push_surf("pz", &[z])).collect();
-    let mut mix_idx = 0usize;
     for iz in 0..nz {
         let zbox = format!("{} -{}", zsurfs[iz], zsurfs[iz + 1]);
         for ir in 0..nr {
-            let mid = g.mix[mix_idx];
-            mix_idx += 1;
+            let mid = if use_split_mix {
+                g.mix[iz * nr + ir]
+            } else {
+                g.mix[z_parents[iz] * orig_nr + r_parents[ir]]
+            };
             let expr = if ir == 0 {
                 format!("-{} {zbox}", csurfs[0])
             } else {
@@ -774,36 +986,53 @@ fn emit_hexcel(g: &DragonGeom, em: &mut McnpEmitter) -> Result<String, DragonErr
         .side
         .ok_or_else(|| DragonError::Parse(format!("HEXCEL `{}` missing SIDE parameter", g.name)))?;
     validate_radii(&g.radii, &g.name)?;
-    let znodes = if g.meshz.is_empty() {
+    let raw_znodes = if g.meshz.is_empty() {
         vec![-10.0, 10.0]
     } else {
         bounds_from_mesh(&g.meshz, &format!("{} MESHZ", g.name))?;
         g.meshz.clone()
     };
-    let nr = g.radii.len();
+    let orig_nr = g.radii.len();
+    let orig_nz = raw_znodes.len() - 1;
+    let (radii, r_parents) = expand_radii(&g.radii, &g.splitr, &g.name)?;
+    let (znodes, z_parents) =
+        expand_linear_mesh(&raw_znodes, &g.splitz, &format!("{} MESHZ", g.name))?;
+    let nr = radii.len();
     let nz = znodes.len() - 1;
-    let expected = (nr + 1) * nz;
-    if g.mix.len() != expected {
+    let unsplit_expected = (orig_nr + 1) * orig_nz;
+    let split_expected = (nr + 1) * nz;
+    let use_split_mix = if g.mix.len() == unsplit_expected {
+        false
+    } else if g.mix.len() == split_expected {
+        true
+    } else {
         return Err(DragonError::Parse(format!(
-            "HEXCEL `{}` MIX has {} entries, expected {expected} ({nr} rings + moderator across {nz} z-slices)",
+            "HEXCEL `{}` MIX has {} entries, expected {unsplit_expected} ({orig_nr} rings + moderator across {orig_nz} z-slices){}",
             g.name,
-            g.mix.len()
+            g.mix.len(),
+            if split_expected != unsplit_expected {
+                format!(" or {split_expected} for SPLITR/SPLITZ")
+            } else {
+                String::new()
+            }
         )));
-    }
+    };
 
     let z0 = znodes[0];
     let dz = *znodes.last().unwrap() - z0;
     let r_flat = side * 3.0_f64.sqrt() * 0.5;
     let hex_surf = em.push_surf("rhp", &[0.0, 0.0, z0, 0.0, 0.0, dz, r_flat, 0.0, 0.0]);
-    let csurfs: Vec<i64> = g.radii.iter().map(|&r| em.push_surf("cz", &[r])).collect();
+    let csurfs: Vec<i64> = radii.iter().map(|&r| em.push_surf("cz", &[r])).collect();
     let zsurfs: Vec<i64> = znodes.iter().map(|&z| em.push_surf("pz", &[z])).collect();
 
-    let mut mix_idx = 0usize;
     for iz in 0..nz {
         let zbox = format!("{} -{} -{hex_surf}", zsurfs[iz], zsurfs[iz + 1]);
         for ir in 0..nr {
-            let mid = g.mix[mix_idx];
-            mix_idx += 1;
+            let mid = if use_split_mix {
+                g.mix[iz * (nr + 1) + ir]
+            } else {
+                g.mix[z_parents[iz] * (orig_nr + 1) + r_parents[ir]]
+            };
             let expr = if ir == 0 {
                 format!("-{} {zbox}", csurfs[0])
             } else {
@@ -816,8 +1045,11 @@ fn emit_hexcel(g: &DragonGeom, em: &mut McnpEmitter) -> Result<String, DragonErr
                 &format!("{} HEXCEL ring {ir} mix={mid}", g.name),
             );
         }
-        let mod_mid = g.mix[mix_idx];
-        mix_idx += 1;
+        let mod_mid = if use_split_mix {
+            g.mix[iz * (nr + 1) + nr]
+        } else {
+            g.mix[z_parents[iz] * (orig_nr + 1) + orig_nr]
+        };
         let outer = if let Some(&last_c) = csurfs.last() {
             format!("{last_c} {zbox}")
         } else {
@@ -939,25 +1171,11 @@ fn emit_cartesian_grid(
     }
 
     // Homogeneous grid with MIX
-    let expected = nx * ny * nz;
-    if g.mix.len() != expected {
-        return Err(DragonError::Parse(format!(
-            "`{}` MIX has {} entries, expected {expected} ({nx}x{ny}x{nz})",
-            g.name,
-            g.mix.len()
-        )));
-    }
-    if g.meshx.len() != nx + 1 || g.meshy.len() != ny + 1 {
-        return Err(DragonError::Parse(format!(
-            "`{}` expects {} MESHX nodes and {} MESHY nodes",
-            g.name,
-            nx + 1,
-            ny + 1
-        )));
-    }
-    bounds_from_mesh(&g.meshx, "MESHX")?;
-    bounds_from_mesh(&g.meshy, "MESHY")?;
-    let znodes = if g.meshz.is_empty() {
+    let (xnodes, x_parents) =
+        expand_linear_mesh(&g.meshx, &g.splitx, &format!("{} MESHX", g.name))?;
+    let (ynodes, y_parents) =
+        expand_linear_mesh(&g.meshy, &g.splity, &format!("{} MESHY", g.name))?;
+    let raw_znodes = if g.meshz.is_empty() {
         vec![-10.0, 10.0]
     } else {
         if g.meshz.len() != nz + 1 {
@@ -970,17 +1188,54 @@ fn emit_cartesian_grid(
         bounds_from_mesh(&g.meshz, "MESHZ")?;
         g.meshz.clone()
     };
+    let (znodes, z_parents) =
+        expand_linear_mesh(&raw_znodes, &g.splitz, &format!("{} MESHZ", g.name))?;
 
-    let xsurfs: Vec<i64> = g.meshx.iter().map(|&x| em.push_surf("px", &[x])).collect();
-    let ysurfs: Vec<i64> = g.meshy.iter().map(|&y| em.push_surf("py", &[y])).collect();
+    if g.meshx.len() != nx + 1 || g.meshy.len() != ny + 1 {
+        return Err(DragonError::Parse(format!(
+            "`{}` expects {} MESHX nodes and {} MESHY nodes",
+            g.name,
+            nx + 1,
+            ny + 1
+        )));
+    }
+    bounds_from_mesh(&g.meshx, "MESHX")?;
+    bounds_from_mesh(&g.meshy, "MESHY")?;
+
+    let snx = xnodes.len() - 1;
+    let sny = ynodes.len() - 1;
+    let snz = znodes.len() - 1;
+    let unsplit_expected = nx * ny * nz;
+    let split_expected = snx * sny * snz;
+    let use_split_mix = if g.mix.len() == unsplit_expected {
+        false
+    } else if g.mix.len() == split_expected {
+        true
+    } else {
+        return Err(DragonError::Parse(format!(
+            "`{}` MIX has {} entries, expected {unsplit_expected} ({nx}x{ny}x{nz}){}",
+            g.name,
+            g.mix.len(),
+            if split_expected != unsplit_expected {
+                format!(" or {split_expected} for SPLITX/SPLITY/SPLITZ")
+            } else {
+                String::new()
+            }
+        )));
+    };
+
+    let xsurfs: Vec<i64> = xnodes.iter().map(|&x| em.push_surf("px", &[x])).collect();
+    let ysurfs: Vec<i64> = ynodes.iter().map(|&y| em.push_surf("py", &[y])).collect();
     let zsurfs: Vec<i64> = znodes.iter().map(|&z| em.push_surf("pz", &[z])).collect();
 
-    let mut mix_idx = 0usize;
-    for iz in 0..nz {
-        for iy in 0..ny {
-            for ix in 0..nx {
-                let mid = g.mix[mix_idx];
-                mix_idx += 1;
+    for iz in 0..snz {
+        for iy in 0..sny {
+            for ix in 0..snx {
+                let mid = if use_split_mix {
+                    g.mix[(iz * sny + iy) * snx + ix]
+                } else {
+                    g.mix[(z_parents[iz] * ny + y_parents[iy]) * nx + x_parents[ix]]
+                };
                 let region = format!(
                     "{} -{} {} -{} {} -{}",
                     xsurfs[ix],
@@ -1098,6 +1353,14 @@ pub fn dragon_to_mcnp(src: &str) -> Result<String, DragonError> {
         "DRAGON5 GEO: `{}` loaded natively by llevant-dragon",
         root.name
     );
+    if !root.boundaries.is_empty() {
+        let bsummary: Vec<String> = root
+            .boundaries
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let _ = writeln!(mcnp, "c DRAGON5 boundaries: {}", bsummary.join(", "));
+    }
     for c in &em.cells {
         mcnp.push_str(c);
         mcnp.push('\n');
@@ -1170,5 +1433,91 @@ T := GEO: :: TUBE 2
         let t_mcnp = dragon_to_mcnp(tube).expect("translate TUBE");
         assert!(t_mcnp.contains("cz 0.5"));
         assert!(t_mcnp.contains("1 10 -1"));
+    }
+
+    #[test]
+    fn expands_splitr_splitx_splity_splitz_and_records_boundaries() {
+        let carcel = r#"
+PIN := GEO: :: CARCEL 2
+  X- REFL X+ REFL Y- REFL Y+ REFL
+  MESHX 0.0 1.26 MESHY 0.0 1.26
+  RADIUS 0.0 0.45 0.50
+  SPLITR 3 1
+  MIX 1 2 3 ;
+"#;
+        let mcnp = dragon_to_mcnp(carcel).expect("translate SPLITR CARCEL");
+        assert!(mcnp.contains("c DRAGON5 boundaries: X-=REFL, X+=REFL, Y-=REFL, Y+=REFL"));
+        // 3 equal-area sub-rings inside r=0.45 plus outer r=0.50 plus moderator = 5 material cells + graveyard.
+        let r1 = 0.45 * (1.0_f64 / 3.0).sqrt();
+        let r2 = 0.45 * (2.0_f64 / 3.0).sqrt();
+        assert!(
+            mcnp.contains(&format!("c/z 0.63 0.63 {}", fmt_num(r1))),
+            "{mcnp}"
+        );
+        assert!(
+            mcnp.contains(&format!("c/z 0.63 0.63 {}", fmt_num(r2))),
+            "{mcnp}"
+        );
+        assert!(mcnp.contains("c/z 0.63 0.63 0.45"), "{mcnp}");
+        assert!(mcnp.contains("c/z 0.63 0.63 0.5"), "{mcnp}");
+        assert!(mcnp.contains("ring 0 z=0 mix=1"));
+        assert!(mcnp.contains("ring 2 z=0 mix=1"));
+        assert!(mcnp.contains("ring 3 z=0 mix=2"));
+        assert!(mcnp.contains("moderator z=0 mix=3"));
+
+        // Explicit per-subring MIX (e.g. depletion rings):
+        let burnup = r#"
+BURN := GEO: :: CARCEL 2
+  MESHX 0.0 1.26 MESHY 0.0 1.26
+  RADIUS 0.0 0.45 0.50
+  SPLITR 3 1
+  MIX 11 12 13 20 30 ;
+"#;
+        let b_mcnp = dragon_to_mcnp(burnup).expect("translate burnup SPLITR");
+        assert!(b_mcnp.contains("mix=11"));
+        assert!(b_mcnp.contains("mix=12"));
+        assert!(b_mcnp.contains("mix=13"));
+        assert!(b_mcnp.contains("mix=20"));
+        assert!(b_mcnp.contains("mix=30"));
+
+        // Negative SPLITR (equal-radius) + SPLITZ on TUBE:
+        let tube = r#"
+T := GEO: :: TUBE 2
+  RADIUS 0.0 0.6 1.0
+  MESHZ 0.0 10.0
+  SPLITR -2 1
+  SPLITZ 2
+  MIX 5 6 ;
+"#;
+        let t_mcnp = dragon_to_mcnp(tube).expect("translate SPLITR/SPLITZ TUBE");
+        assert!(t_mcnp.contains("cz 0.3"));
+        assert!(t_mcnp.contains("pz 5"));
+
+        // Homogeneous CAR2D with SPLITX/SPLITY and HEXCEL with SPLITR + HBC:
+        let grid = r#"
+G := GEO: :: CAR2D 2 1
+  X- VOID X+ REFL Y- REFL Y+ REFL
+  MESHX 0.0 1.0 2.0
+  MESHY 0.0 2.0
+  SPLITX 2 1 SPLITY 2
+  MIX 1 2 ;
+"#;
+        let g_mcnp = dragon_to_mcnp(grid).expect("translate SPLITX/SPLITY CAR2D");
+        assert!(g_mcnp.contains("px 0.5"));
+        assert!(g_mcnp.contains("py 1"));
+        assert!(g_mcnp.contains("(0,0,0) mix=1"));
+        assert!(g_mcnp.contains("(2,1,0) mix=2"));
+
+        let hex = r#"
+H := GEO: :: HEXCEL 2
+  HBC COMPLETE REFL
+  SIDE 1.0
+  RADIUS 0.0 0.4 0.5
+  SPLITR 2 1
+  MIX 1 2 3 ;
+"#;
+        let h_mcnp = dragon_to_mcnp(hex).expect("translate SPLITR HEXCEL");
+        assert!(h_mcnp.contains("c DRAGON5 boundaries: HBC=COMPLETE REFL"));
+        assert!(h_mcnp.contains(&format!("cz {}", fmt_num(0.4 * 0.5_f64.sqrt()))));
     }
 }

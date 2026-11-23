@@ -35,6 +35,17 @@ def test_tripoli4_and_dragon5_load_and_check_cleanly():
     assert d5.locate(1.89, 1.89, 0.0).material == 2
     assert d5.check(0.25) == []
 
+    d5_split = llevant.load(DOCS_EXAMPLES / "dragon5" / "depletion_pin_splitr.x2m")
+    assert d5_split.diagnostics == []
+    assert d5_split.locate(0.63, 0.63, 2.5).material == 1
+    assert d5_split.locate(0.63 + 0.44, 0.63, 2.5).material == 4
+    assert d5_split.check(0.25) == []
+
+    omc_dist = llevant.load(DOCS_EXAMPLES / "openmc" / "distributed_pin_plots.xml")
+    assert omc_dist.diagnostics == []
+    assert len(llevant.openmc_plots(DOCS_EXAMPLES / "openmc" / "distributed_pin_plots.xml")) == 2
+    assert omc_dist.check(0.25) == []
+
 
 def test_to_mcnp_translation_path_text_and_output(tmp_path: Path):
     """to_mcnp converts OpenMC XML, TRIPOLI-4, and DRAGON5 files or raw text to valid MCNP."""
